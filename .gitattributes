@@ -1,0 +1,3 @@
+# 统一文本换行，确保 Windows 检出后的容器 shell 脚本仍可正常执行。
+* text=auto eol=lf
+*.png binary

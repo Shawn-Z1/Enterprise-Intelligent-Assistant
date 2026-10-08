@@ -1,0 +1,191 @@
+name: zhixing
+
+x-backend-env: &backend-env
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: ${POSTGRES_DB:?请先运行初始化脚本}
+  POSTGRES_USER: ${POSTGRES_USER:?请先运行初始化脚本}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请先运行初始化脚本}
+  REDIS_HOST: redis
+  MILVUS_HOST: milvus
+  APP_MINIO_ENDPOINT: minio:9000
+  APP_MINIO_ACCESS_KEY: ${APP_MINIO_ACCESS_KEY:?请先运行初始化脚本}
+  APP_MINIO_SECRET_KEY: ${APP_MINIO_SECRET_KEY:?请先运行初始化脚本}
+  APP_MINIO_BUCKET: ${APP_MINIO_BUCKET:-application-files}
+  PRIMARY_BASE_URL: ${PRIMARY_BASE_URL:-https://api.deepseek.com}
+  PRIMARY_API_KEY: ${PRIMARY_API_KEY:-}
+  PRIMARY_MODEL: ${PRIMARY_MODEL:-deepseek-flash}
+  FALLBACK_BASE_URL: ${FALLBACK_BASE_URL:-}
+  FALLBACK_API_KEY: ${FALLBACK_API_KEY:-}
+  FALLBACK_MODEL: ${FALLBACK_MODEL:-qwen-plus}
+
+x-app-dependencies: &app-dependencies
+  postgres:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  milvus:
+    condition: service_healthy
+  minio-init:
+    condition: service_completed_successfully
+
+services:
+  web:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/web-health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    build: ./backend
+    image: zhixing-backend:0.1.0
+    environment: *backend-env
+    depends_on: *app-dependencies
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/ready', timeout=8)"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  worker:
+    image: zhixing-backend:0.1.0
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    environment: *backend-env
+    depends_on: *app-dependencies
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker_health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4.5-bookworm
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: ["etcd", "-advertise-client-urls=http://etcd:2379", "-listen-client-urls=http://0.0.0.0:2379", "--data-dir=/etcd"]
+    volumes:
+      - etcd-data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: doristhirdpartydocker/minio:RELEASE.2024-11-07T00-52-20Z
+    pull_policy: never
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: ["minio", "server", "/data", "--console-address", ":9001"]
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # 一次性初始化服务：两个 Bucket、两个最小权限身份，成功后退出。
+  minio-init:
+    # 复用已验证镜像自带的 mc，避免再拉取当前不可用的独立 mc 镜像。
+    image: doristhirdpartydocker/minio:RELEASE.2024-11-07T00-52-20Z
+    pull_policy: never
+    entrypoint: ["/bin/sh", "/bootstrap/init.sh"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MILVUS_ACCESS_KEY: ${MILVUS_ACCESS_KEY}
+      MILVUS_SECRET_KEY: ${MILVUS_SECRET_KEY}
+      APP_MINIO_ACCESS_KEY: ${APP_MINIO_ACCESS_KEY}
+      APP_MINIO_SECRET_KEY: ${APP_MINIO_SECRET_KEY}
+      APP_MINIO_BUCKET: ${APP_MINIO_BUCKET:-application-files}
+    volumes:
+      - ./scripts/minio:/bootstrap:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
+  milvus:
+    image: milvusdb/milvus:v2.5.21
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_REGION: us-east-1
+      MINIO_ACCESS_KEY_ID: ${MILVUS_ACCESS_KEY}
+      MINIO_SECRET_ACCESS_KEY: ${MILVUS_SECRET_KEY}
+      MINIO_BUCKET_NAME: milvus-data
+    volumes:
+      - milvus-data:/var/lib/milvus
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9091/healthz"]
+      interval: 15s
+      start_period: 90s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+networks:
+  default:
+    name: zhixing-network
+
+volumes:
+  postgres-data:
+  redis-data:
+  etcd-data:
+  minio-data:
+  milvus-data:
