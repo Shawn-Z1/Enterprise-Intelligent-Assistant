@@ -30,9 +30,12 @@ function Assert-Page {
 
 Push-Location $projectRoot
 try {
-    Invoke-Browser @('open', "$BaseUrl/login") | Out-Null
-    Invoke-Browser @('wait', '--text', '基础服务已就绪') | Out-Null
+    # 首次启动浏览器时直接输出，避免后台进程继承捕获管道使调用一直等待。
+    & npx --yes agent-browser --session $session open "$BaseUrl/login"
+    if ($LASTEXITCODE -ne 0) { throw '浏览器会话启动失败' }
     Invoke-Browser @('set', 'viewport', '1440', '900') | Out-Null
+    # 等待真实请求结果而非页面下方元素的可见性，避免默认短窗口导致等待停滞。
+    Invoke-Browser @('wait', '--fn', 'document.querySelector(".login-status")?.textContent.includes("基础服务已就绪") === true') | Out-Null
     Assert-Page '登录页面真实预览状态' '({passed: document.querySelector(".primary-button").disabled && document.querySelector("#password").type === "password", title: document.title})'
     Assert-Page '登录左右比例与文字可读性' '({passed: Math.abs(document.querySelector(".login-story").getBoundingClientRect().width / document.querySelector(".login-form-area").getBoundingClientRect().width - 1.5) < 0.02 && parseFloat(getComputedStyle(document.querySelector(".story-note")).fontSize) >= 16 && parseFloat(getComputedStyle(document.querySelector("#account")).fontSize) >= 17, securityText: getComputedStyle(document.querySelector(".story-note")).fontSize, inputText: getComputedStyle(document.querySelector("#account")).fontSize, formWidth: document.querySelector(".login-form-wrap").getBoundingClientRect().width})'
     Assert-Page '登录辅助文字至少14px' '(() => { const small = Array.from(document.querySelectorAll("body *")).filter(el => el instanceof HTMLElement && el.getClientRects().length && getComputedStyle(el).visibility !== "hidden" && Array.from(el.childNodes).some(node => node.nodeType === Node.TEXT_NODE && node.textContent.trim()) && parseFloat(getComputedStyle(el).fontSize) < 14).map(el => ({text: el.textContent, size: getComputedStyle(el).fontSize})); return {passed: small.length === 0, small}; })()'
@@ -73,7 +76,7 @@ try {
     Invoke-Browser @('set', 'viewport', '1440', '900') | Out-Null
     Invoke-Browser @('find', 'role', 'button', 'click', '--name', '运行状态') | Out-Null
     Invoke-Browser @('wait', '--fn', 'document.querySelectorAll(".event-list strong").length > 0') | Out-Null
-    Assert-Page '真实运行面板与事件' '({passed: document.querySelectorAll(".dependency").length === 4 && Array.from(document.querySelectorAll(".dependency")).every(item => item.textContent.includes("已连通")) && document.querySelector(".status-panel").textContent.includes("永久审计将在 M02"), dependencies: Array.from(document.querySelectorAll(".dependency")).map(item => item.textContent), events: document.querySelectorAll(".event-list strong").length})'
+    Assert-Page '真实运行面板与事件' '({passed: document.querySelectorAll(".dependency").length === 4 && Array.from(document.querySelectorAll(".dependency")).every(item => item.textContent.includes("已连通")) && document.querySelector(".status-panel").textContent.includes("永久审计已存入 PostgreSQL"), dependencies: Array.from(document.querySelectorAll(".dependency")).map(item => item.textContent), events: document.querySelectorAll(".event-list strong").length})'
     Invoke-Browser @('screenshot', 'verification/M01/runtime-desktop.png') | Out-Null
     Invoke-Browser @('find', 'role', 'button', 'click', '--name', '关闭运行状态') | Out-Null
     Invoke-Browser @('find', 'role', 'button', 'click', '--name', '对话工作台') | Out-Null

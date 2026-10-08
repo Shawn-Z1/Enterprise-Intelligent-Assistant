@@ -83,7 +83,7 @@ export default function App() {
         <span className={dependency.status === 'ready' ? 'healthy-text' : 'error-text'}>{dependency.status === 'ready' ? '已连通' : '不可用'}</span></div>
       <code>{dependency.target}</code><p>{dependency.detail}</p><small>{dependency.latency_ms} ms</small>
     </div>)}
-    <h3>基础事件</h3><p className="muted small">M01 仅当前进程最近 100 条基础设施事件。永久审计将在 M02 建立。</p>
+    <h3>基础事件</h3><p className="muted small">本面板显示当前进程最近 100 条基础事件。永久审计已存入 PostgreSQL，管理员查询页面将在后续开放。</p>
     {eventsError && <p className="error-text">{eventsError}</p>}
     <div className="event-list">{events.slice(-6).reverse().map(event => <div key={event.event_id}>
       <span>#{event.event_id} · {new Date(event.timestamp).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' })}</span>
@@ -101,7 +101,7 @@ export default function App() {
       </div></div>
       <div className="story-note"><ShieldCheck size={20} aria-hidden="true" /><span>可信身份、受控访问、操作可追溯</span></div>
     </section>
-    <section className="login-form-area"><div className="login-form-wrap"><span className="stage-badge">M01 · 工程骨架</span>
+    <section className="login-form-area"><div className="login-form-wrap"><span className="stage-badge">M02 · 数据基础</span>
       <h2>{registration ? '创建账号' : '欢迎来到知行'}</h2><p className="muted">{registration ? '注册后由管理员分配业务权限' : '使用企业账号，开启你的工作空间'}</p>
       <form onSubmit={event => event.preventDefault()}>
         <label htmlFor="account">账号</label><input id="account" autoComplete="username" placeholder="请输入账号" />
@@ -128,7 +128,7 @@ export default function App() {
         <button className="profile-button" onClick={() => selectPage('profile')}><span className="avatar"><UserRound size={20} /></span><span><strong>访客预览</strong><small>尚未登录</small></span><ChevronRight size={15} /></button></div>
     </aside>
     <div className="main-area"><header className="topbar"><div><button className="mobile-menu" aria-label="展开导航" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(!sidebarOpen)}><Menu size={20} /></button><span>工作空间</span><ChevronRight size={14} /><strong>{pages[page]}</strong></div>
-      <div><span className="stage-badge">M01 · 预览</span><button className="header-login" onClick={() => navigate('login')}>账号登录<ArrowRight size={15} /></button></div></header>
+      <div><span className="stage-badge">M02 · 预览</span><button className="header-login" onClick={() => navigate('login')}>账号登录<ArrowRight size={15} /></button></div></header>
       <main className="workspace-content">
         {page === 'conversation' ? <div className="conversation-shell"><div className="conversation-overview"><div className="welcome"><h1>新建对话</h1><p>在这里查询资料、分析数据，或整理工作记录。</p></div>
           <section className="task-guide" aria-label="工作台功能预览"><div className="guide-heading"><h2>工作台可以处理什么</h2><span>功能按开发阶段开放</span></div>

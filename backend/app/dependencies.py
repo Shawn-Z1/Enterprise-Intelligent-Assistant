@@ -20,7 +20,9 @@ async def check_postgres(settings: Settings) -> str:
                                       timeout=settings.dependency_timeout_seconds)
     try:
         assert await connection.fetchval("SELECT 1") == 1
-        return "SELECT 1 成功"
+        if not await connection.fetchval("SELECT EXISTS(SELECT 1 FROM app_system.schema_migrations WHERE version='001_foundation.sql')"):
+            raise RuntimeError("M02 结构未初始化")
+        return "SELECT 1 / M02 迁移版本检查成功"
     finally:
         await connection.close()
 

@@ -1,0 +1,7 @@
+[
+  {"user_id":"20000000-0000-0000-0000-000000000001","username":"admin","display_name":"演示管理员","role":"admin","department_id":"10000000-0000-0000-0000-000000000001","grade":10,"employee_id":"30000000-0000-0000-0000-000000000001","knowledge_enabled":true,"business_query_enabled":true},
+  {"user_id":"20000000-0000-0000-0000-000000000002","username":"zhangsan","display_name":"张三","role":"member","department_id":"10000000-0000-0000-0000-000000000002","grade":3,"employee_id":"30000000-0000-0000-0000-000000000002","knowledge_enabled":true,"business_query_enabled":true},
+  {"user_id":"20000000-0000-0000-0000-000000000003","username":"lisi","display_name":"李四","role":"member","department_id":"10000000-0000-0000-0000-000000000003","grade":5,"employee_id":"30000000-0000-0000-0000-000000000003","knowledge_enabled":true,"business_query_enabled":true},
+  {"user_id":"20000000-0000-0000-0000-000000000004","username":"wangwu","display_name":"王五","role":"member","department_id":"10000000-0000-0000-0000-000000000004","grade":6,"employee_id":"30000000-0000-0000-0000-000000000004","knowledge_enabled":true,"business_query_enabled":true},
+  {"user_id":"20000000-0000-0000-0000-000000000005","username":"zhaoliu","display_name":"赵六","role":"member","department_id":"10000000-0000-0000-0000-000000000002","grade":9,"employee_id":"30000000-0000-0000-0000-000000000005","knowledge_enabled":true,"business_query_enabled":true}
+]

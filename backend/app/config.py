@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     postgres_db: str = "zhixing"
     postgres_user: str = "zhixing"
     postgres_password: SecretStr
+    business_db_user: str = "zhixing_business_reader"
+    business_db_password: SecretStr
     redis_host: str = "redis"
     redis_port: int = 6379
     milvus_host: str = "milvus"

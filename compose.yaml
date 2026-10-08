@@ -4,8 +4,10 @@ x-backend-env: &backend-env
   POSTGRES_HOST: postgres
   POSTGRES_PORT: "5432"
   POSTGRES_DB: ${POSTGRES_DB:?请先运行初始化脚本}
-  POSTGRES_USER: ${POSTGRES_USER:?请先运行初始化脚本}
-  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请先运行初始化脚本}
+  POSTGRES_USER: ${APP_DB_USER:-zhixing_app}
+  POSTGRES_PASSWORD: ${APP_DB_PASSWORD:?请配置应用数据库凭证}
+  BUSINESS_DB_USER: ${BUSINESS_DB_USER:-zhixing_business_reader}
+  BUSINESS_DB_PASSWORD: ${BUSINESS_DB_PASSWORD:?请配置业务只读数据库凭证}
   REDIS_HOST: redis
   MILVUS_HOST: milvus
   APP_MINIO_ENDPOINT: minio:9000
@@ -46,7 +48,7 @@ services:
 
   api:
     build: ./backend
-    image: zhixing-backend:0.1.0
+    image: zhixing-backend:0.2.0
     environment: *backend-env
     depends_on: *app-dependencies
     healthcheck:
@@ -58,7 +60,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: zhixing-backend:0.1.0
+    image: zhixing-backend:0.2.0
     build: ./backend
     command: ["python", "-m", "app.worker"]
     environment: *backend-env
@@ -70,6 +72,29 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+
+  # 显式管理任务：外置迁移和种子只读挂载，不在应用启动时自动导入。
+  db-admin:
+    profiles: ["tools"]
+    image: zhixing-backend:0.2.0
+    build: ./backend
+    entrypoint: ["python", "-m", "app.db_admin"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      APP_DB_USER: ${APP_DB_USER:-zhixing_app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      BUSINESS_DB_USER: ${BUSINESS_DB_USER:-zhixing_business_reader}
+      BUSINESS_DB_PASSWORD: ${BUSINESS_DB_PASSWORD}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD}
+      INITIAL_DEMO_PASSWORD: ${INITIAL_DEMO_PASSWORD}
+    volumes:
+      - ./database:/database:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   postgres:
     image: postgres:17.6-bookworm
