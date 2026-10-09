@@ -15,14 +15,14 @@ function Save-Evidence {
 function Assert-Check {
     <# 参数为检查名称、条件和证据；记录结果，失败则抛出错误。 #>
     param([string]$Name, [bool]$Passed, [object]$Evidence)
-    $results.Add([pscustomobject]@{ name=$Name; passed=$Passed; timestamp=[DateTime]::UtcNow.ToString('o'); evidence=$Evidence })
+    $results.Add([pscustomobject]@{ name=$Name; passed=$Passed; timestamp=[DateTimeOffset]::Now.ToOffset([TimeSpan]::FromHours(8)).ToString('o'); evidence=$Evidence })
     Save-Evidence
     if (-not $Passed) { throw "验收失败：$Name" }
     Write-Host "通过：$Name"
 }
 
 function Get-Api {
-    <# 参数为 API 路径；通过 web 主入口请求，返回 HTTP 状态、追踪头和 JSON。 #>
+    <# 参数为 API 路径；通过开发 Vite 或生产 web 同源入口请求，返回状态、追踪头和 JSON。 #>
     param([string]$Path)
     $response = Invoke-WebRequest -NoProxy -Uri "$BaseUrl$Path" -SkipHttpErrorCheck -TimeoutSec 15
     return [pscustomobject]@{ status=[int]$response.StatusCode; trace=$response.Headers['X-Trace-ID']; body=($response.Content | ConvertFrom-Json) }
@@ -30,11 +30,11 @@ function Get-Api {
 
 function Wait-Ready {
     <# 无参数轮询真实就绪接口；最多 120 秒，返回就绪响应，否则失败。 #>
-    $deadline = [DateTime]::UtcNow.AddSeconds(120)
+    $deadline = [DateTimeOffset]::Now.ToOffset([TimeSpan]::FromHours(8)).AddSeconds(120)
     do {
         try { $response = Get-Api '/api/health/ready'; if ($response.status -eq 200) { return $response } } catch { }
         Start-Sleep -Seconds 2
-    } while ([DateTime]::UtcNow -lt $deadline)
+    } while ([DateTimeOffset]::Now.ToOffset([TimeSpan]::FromHours(8)) -lt $deadline)
     throw '依赖恢复后未能在 120 秒内就绪'
 }
 

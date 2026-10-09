@@ -1,9 +1,10 @@
 import json
 import sys
-import time
+from datetime import datetime
 from pathlib import Path
 
 from app.config import get_settings
+from app.timezones import beijing_now
 
 
 def is_healthy() -> bool:
@@ -11,7 +12,8 @@ def is_healthy() -> bool:
     settings = get_settings()
     try:
         state = json.loads(Path(settings.worker_state_path).read_text(encoding="utf-8"))
-        return bool(state["ready"] and 0 <= time.time() - state["timestamp"] < settings.worker_stale_seconds
+        age = (beijing_now()-datetime.fromisoformat(state["timestamp"])).total_seconds()
+        return bool(state["ready"] and 0 <= age < settings.worker_stale_seconds
                     and Path(f'/proc/{state["pid"]}').exists())
     except (OSError, ValueError, KeyError):
         return False

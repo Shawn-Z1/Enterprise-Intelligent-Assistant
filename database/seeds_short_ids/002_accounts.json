@@ -1,0 +1,7 @@
+[
+  {"user_id":"U1","username":"admin","display_name":"演示管理员","role":"admin","department_id":"D1","grade":10,"employee_id":"E1","knowledge_enabled":true,"business_query_enabled":true},
+  {"user_id":"U2","username":"zhangsan","display_name":"张三","role":"member","department_id":"D2","grade":3,"employee_id":"E2","knowledge_enabled":true,"business_query_enabled":true},
+  {"user_id":"U3","username":"lisi","display_name":"李四","role":"member","department_id":"D3","grade":5,"employee_id":"E3","knowledge_enabled":true,"business_query_enabled":true},
+  {"user_id":"U4","username":"wangwu","display_name":"王五","role":"member","department_id":"D4","grade":6,"employee_id":"E4","knowledge_enabled":true,"business_query_enabled":true},
+  {"user_id":"U5","username":"zhaoliu","display_name":"赵六","role":"member","department_id":"D2","grade":9,"employee_id":"E5","knowledge_enabled":true,"business_query_enabled":true}
+]

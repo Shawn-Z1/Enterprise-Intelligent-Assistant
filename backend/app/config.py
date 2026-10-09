@@ -28,6 +28,25 @@ class Settings(BaseSettings):
     worker_interval_seconds: int = Field(default=10, ge=1, le=60)
     worker_stale_seconds: int = Field(default=35, ge=5, le=180)
     worker_state_path: str = "/tmp/zhixing-worker-health.json"
+    session_hours: int = Field(default=24,ge=1,le=168)
+    session_cookie_secure: bool = False
+    login_limit_per_minute: int = Field(default=20,ge=3,le=100)
+    primary_base_url: str = "https://api.deepseek.com"
+    primary_api_key: SecretStr = SecretStr("")
+    primary_model: str = "deepseek-flash"
+    fallback_base_url: str = ""
+    fallback_api_key: SecretStr = SecretStr("")
+    fallback_model: str = "qwen-plus"
+    primary_context_tokens: int = Field(default=0,ge=0,le=2_000_000)
+    fallback_context_tokens: int = Field(default=0,ge=0,le=2_000_000)
+    model_output_tokens: int = Field(default=2048,ge=64,le=32768)
+    model_read_timeout_seconds: float = Field(default=45,ge=1,le=180)
+    model_retry_backoff_seconds: float = Field(default=0.5,ge=0,le=10)
+    model_circuit_failures: int = Field(default=3,ge=1,le=20)
+    model_circuit_seconds: float = Field(default=30,ge=0.01,le=300)
+    run_timeout_seconds: int = Field(default=240,ge=5,le=900)
+    worker_concurrency: int = Field(default=2,ge=1,le=4)
+    run_lease_seconds: int = Field(default=60,ge=20,le=300)
 
 
 @lru_cache

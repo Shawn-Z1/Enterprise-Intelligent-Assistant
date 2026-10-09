@@ -11,13 +11,13 @@ docker compose --profile tools run --rm --no-deps --entrypoint python \
   -m unittest discover -s /tests -p test_m02.py -v > verification/M02/database-tests.txt 2>&1
 docker compose run --rm --no-deps -e PYTHONPATH=/app -v "$project_root/backend/tests:/tests:ro" api \
   python -m unittest discover -s /tests -p test_foundation.py -v > verification/M02/foundation-tests.txt 2>&1
-docker compose run --rm --no-deps -e PYTHONPATH=/app -v "$project_root/backend/tests:/tests:ro" api \
+docker compose run --rm --no-deps -e PYTHONPATH=/app -e VERIFICATION_API_URL=http://api:8000 -v "$project_root/backend/tests:/tests:ro" api \
   python /tests/verify_m02_runtime.py prepare > verification/M02/persistence-before.json
 
 # 重启 PG 并重建应用容器，保留命名卷，随后读取同一永久审计标记。
 docker compose restart postgres
 docker compose up -d --force-recreate api worker --wait --wait-timeout 180
-docker compose run --rm --no-deps -e PYTHONPATH=/app -v "$project_root/backend/tests:/tests:ro" \
+docker compose run --rm --no-deps -e PYTHONPATH=/app -e VERIFICATION_API_URL=http://api:8000 -v "$project_root/backend/tests:/tests:ro" \
   -v "$project_root/verification:/verification:ro" api \
   python /tests/verify_m02_runtime.py check --state-file /verification/M02/persistence-before.json \
   > verification/M02/persistence-after.json

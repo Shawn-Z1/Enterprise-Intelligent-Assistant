@@ -1,7 +1,7 @@
 import re
 from contextlib import asynccontextmanager
 from typing import Any, Literal
-from uuid import UUID, uuid4
+from app.ids import ShortId, new_id
 
 import asyncpg
 from pydantic import BaseModel, Field, model_validator
@@ -69,14 +69,14 @@ class AuditRecorder:
                 async with acquired.transaction():
                     yield acquired
 
-    async def append(self, trace_id: UUID, event_type: str, raw_json: dict, *, span_id: UUID | None = None,
-                     parent_span_id: UUID | None = None, span_name: str = "operation", user_id: UUID | None = None,
-                     conversation_id: UUID | None = None, run_id: UUID | None = None, call_id: str | None = None,
+    async def append(self, trace_id: ShortId, event_type: str, raw_json: dict, *, span_id: ShortId | None = None,
+                     parent_span_id: ShortId | None = None, span_name: str = "operation", user_id: ShortId | None = None,
+                     conversation_id: ShortId | None = None, run_id: ShortId | None = None, call_id: str | None = None,
                      usage: Usage | None = None, duration_ms: float | None = None,
                      connection: asyncpg.Connection | None = None) -> dict:
-        """接收 trace/span、身份快照、原始 JSON 和用量；事务内追加并返回事件编号及 UTC 时间。"""
+        """接收 trace/span、身份快照、原始 JSON 和用量；事务内追加并返回事件编号及北京时间。"""
         # 每次动作可生成独立 span；同一 trace 下按 event_id 排列所有追加记录。
-        span_id = span_id or uuid4()
+        span_id = span_id or new_id()
         usage = usage or Usage()
         payload = redact_secrets(raw_json, self.secrets)
         async with self._transaction(connection) as conn:
@@ -96,7 +96,7 @@ class AuditRecorder:
                 usage.method, usage.model, duration_ms)
             return dict(row)
 
-    async def read_trace(self, trace_id: UUID) -> list[dict]:
+    async def read_trace(self, trace_id: ShortId) -> list[dict]:
         """接收 trace ID，通过内部受限连接读取有序事件；返回列表，不作为公共审计接口。"""
         if self.pool is None:
             raise RuntimeError("审计连接池未配置")

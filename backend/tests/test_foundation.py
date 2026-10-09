@@ -2,7 +2,7 @@ import os
 from io import BytesIO
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from uuid import UUID, uuid4
+from app.ids import new_id, ShortId
 
 from fastapi.testclient import TestClient
 from minio import Minio
@@ -29,7 +29,7 @@ class FoundationTests(unittest.TestCase):
                        secret_key=settings.app_minio_secret_key.get_secret_value(), secure=False,
                        region="us-east-1")
         # 随机对象键仅用于验收，不能碰到已有业务文件。
-        object_key = f"verification/m01/{uuid4()}.txt"
+        object_key = f"verification/m01/{new_id()}.txt"
         payload = "M01 真实文件存储验收".encode("utf-8")
         try:
             client.put_object(settings.app_minio_bucket, object_key, BytesIO(payload), len(payload))
@@ -48,13 +48,13 @@ class FoundationTests(unittest.TestCase):
     def test_event_window_and_concurrency(self):
         """并发追加事件，验证窗口上限与唯一递增序号；无参数，无返回值。"""
         events = InfrastructureEvents(capacity=7)
-        trace_id = uuid4()
+        trace_id = new_id()
         with ThreadPoolExecutor(max_workers=8) as executor:
             list(executor.map(lambda number: events.record(trace_id, "test.event", {"number": number}), range(30)))
         stored = events.read(after=0, limit=100)
         self.assertEqual([event.event_id for event in stored], list(range(24, 31)))
         self.assertEqual(len(events.read(after=28, limit=1)), 1)
-        self.assertTrue(all(event.timestamp.utcoffset().total_seconds() == 0 for event in stored))
+        self.assertTrue(all(event.timestamp.utcoffset().total_seconds() == 8*3600 for event in stored))
 
     def test_live_and_real_readiness(self):
         """实际访问四种 Compose 依赖并核对追踪头；无参数，无返回值。"""
@@ -65,7 +65,7 @@ class FoundationTests(unittest.TestCase):
             response = client.get("/api/health/ready")
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["trace_id"], response.headers["X-Trace-ID"])
-            UUID(response.json()["trace_id"])
+            self.assertRegex(response.json()["trace_id"], r"^[A-Za-z0-9_-]{16}$")
             self.assertEqual(set(response.json()["dependencies"]), {"postgres", "redis", "milvus", "minio"})
             self.assertTrue(all(item["status"] == "ready" for item in response.json()["dependencies"].values()))
             events = client.get("/api/events").json()
@@ -91,7 +91,7 @@ class FoundationTests(unittest.TestCase):
                 self.assertEqual(response.json()["error"]["code"], "VALIDATION_ERROR")
                 self.assertEqual(response.json()["trace_id"], response.headers["X-Trace-ID"])
             response = client.post("/api/auth/login", json={"account": "preview", "password": "not-a-real-password"})
-            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.status_code, 422)
             self.assertNotIn("not-a-real-password", response.text)
             self.assertIn("trace_id", response.json())
 

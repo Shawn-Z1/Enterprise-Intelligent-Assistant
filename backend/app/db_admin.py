@@ -7,7 +7,7 @@ import json
 import os
 import re
 from pathlib import Path
-from uuid import UUID, uuid4
+from app.ids import ShortId, new_id
 
 import asyncpg
 from pydantic import SecretStr
@@ -85,10 +85,14 @@ async def provision_roles(conn: asyncpg.Connection, settings: BootstrapSettings)
                 raise RuntimeError("受控角色不应具有其他角色的成员权限")
     database = identifier(settings.postgres_db)
     await conn.execute(f"REVOKE ALL ON DATABASE {database} FROM PUBLIC; REVOKE ALL ON SCHEMA public FROM PUBLIC")
-    await conn.execute(f"GRANT CONNECT,CREATE ON DATABASE {database} TO {identifier(owner)}")
+    # 无登录结构拥有者需要事务内临时映射表；应用和业务只读身份仍没有建表权限。
+    await conn.execute(f"GRANT CONNECT,CREATE,TEMPORARY ON DATABASE {database} TO {identifier(owner)}")
     await conn.execute(f"GRANT CONNECT ON DATABASE {database} TO {identifier(settings.app_db_user)}, {identifier(settings.business_db_user)}")
     await conn.execute(f"ALTER ROLE {identifier(settings.business_db_user)} SET default_transaction_read_only=on")
     await conn.execute(f"ALTER ROLE {identifier(settings.business_db_user)} SET search_path=demo_business,pg_catalog")
+    await conn.execute(f"ALTER DATABASE {database} SET timezone='Asia/Shanghai'")
+    for role_name in (settings.postgres_user, owner, settings.app_db_user, settings.business_db_user):
+        await conn.execute(f"ALTER ROLE {identifier(role_name)} SET timezone='Asia/Shanghai'")
     return owner
 
 
@@ -138,7 +142,7 @@ async def migrate(conn: asyncpg.Connection, settings: BootstrapSettings) -> dict
         if not applied and not skipped:
             raise RuntimeError("未找到外置结构迁移文件")
         await grant_runtime_access(conn, settings)
-        await AuditRecorder(None, "db-admin").append(uuid4(), "database.migrated", {"applied": applied, "skipped": skipped}, connection=conn)
+        await AuditRecorder(None, "db-admin").append(new_id(), "database.migrated", {"applied": applied, "skipped": skipped}, connection=conn)
     return {"applied": applied, "skipped": skipped}
 
 
@@ -147,12 +151,17 @@ async def seed(conn: asyncpg.Connection, settings: BootstrapSettings) -> dict:
     applied, skipped, created_accounts = [], [], 0
     async with conn.transaction():
         await conn.execute("SELECT pg_advisory_xact_lock(8200201)")
-        for path in sorted((Path(settings.database_root) / "seeds").iterdir()):
+        # 初始化脚本中的未标注时区时间统一按北京时间解释；不改已导入记录或历史文件指纹。
+        await conn.execute("SET LOCAL TIME ZONE 'Asia/Shanghai'")
+        # 新版种子独立保存，历史文件及其指纹不变，兼容现有数据库升级和全新部署。
+        seed_root = Path(settings.database_root) / "seeds_short_ids"
+        for path in sorted(seed_root.iterdir()):
             if path.suffix not in (".sql", ".json"):
                 continue
             content = path.read_text(encoding="utf-8")
             digest = hashlib.sha256(content.encode()).hexdigest()
-            existing = await conn.fetchval("SELECT sha256 FROM app_system.seed_receipts WHERE source_key=$1", path.name)
+            source_key = "short_ids/" + path.name
+            existing = await conn.fetchval("SELECT sha256 FROM app_system.seed_receipts WHERE source_key=$1", source_key)
             if existing:
                 if existing != digest:
                     raise RuntimeError("已导入种子文件被修改，请新增种子文件")
@@ -162,21 +171,25 @@ async def seed(conn: asyncpg.Connection, settings: BootstrapSettings) -> dict:
                 await conn.execute(content)
             else:
                 for account in json.loads(content):
-                    if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM app_system.users WHERE user_id=$1 OR username=$2)", UUID(account["user_id"]), account["username"]):
-                        raise RuntimeError("初次种子账号与已有身份冲突，拒绝猜测关联")
+                    current = await conn.fetch("SELECT user_id,username FROM app_system.users WHERE user_id=$1 OR username=$2", account["user_id"], account["username"])
+                    if current:
+                        if len(current) != 1 or current[0]["user_id"] != account["user_id"] or current[0]["username"] != account["username"]:
+                            raise RuntimeError("种子账号与已有身份冲突，拒绝猜测关联")
+                        # 已迁移的同一身份保留现有密码和授权，不能被初始配置重置。
+                        continue
                     password = settings.initial_admin_password if account["role"] == "admin" else settings.initial_demo_password
                     encoded = hash_password(password.get_secret_value())
                     await conn.execute("""INSERT INTO app_system.users(user_id,username,display_name,password_hash,role,
                         department_id,grade,employee_id,knowledge_enabled,business_query_enabled)
-                        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""", UUID(account["user_id"]), account["username"],
-                        account["display_name"], encoded, account["role"], UUID(account["department_id"]), account["grade"],
-                        UUID(account["employee_id"]), account["knowledge_enabled"], account["business_query_enabled"])
+                        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""", account["user_id"], account["username"],
+                        account["display_name"], encoded, account["role"], account["department_id"], account["grade"],
+                        account["employee_id"], account["knowledge_enabled"], account["business_query_enabled"])
                     created_accounts += 1
-            await conn.execute("INSERT INTO app_system.seed_receipts(source_key,sha256) VALUES($1,$2)", path.name, digest)
+            await conn.execute("INSERT INTO app_system.seed_receipts(source_key,sha256) VALUES($1,$2)", source_key, digest)
             applied.append(path.name)
         if not applied and not skipped:
             raise RuntimeError("未找到外置种子文件")
-        await AuditRecorder(None, "db-admin").append(uuid4(), "database.seeded",
+        await AuditRecorder(None, "db-admin").append(new_id(), "database.seeded",
             {"applied": applied, "skipped": skipped, "created_accounts": created_accounts}, connection=conn)
     return {"applied": applied, "skipped": skipped, "created_accounts": created_accounts}
 

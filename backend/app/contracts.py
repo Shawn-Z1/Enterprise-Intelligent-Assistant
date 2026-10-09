@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Any, Literal
-from uuid import UUID
+from app.ids import ShortId
 
 from pydantic import BaseModel
 
@@ -18,8 +18,8 @@ class RunEvent(BaseModel):
     """统一事件信封；M01 仅基础设施事件，业务运行标识暂为空。"""
 
     event_id: int
-    trace_id: UUID
-    run_id: UUID | None = None
+    trace_id: ShortId
+    run_id: ShortId | None = None
     timestamp: datetime
     type: str
     stage: str = "infrastructure"

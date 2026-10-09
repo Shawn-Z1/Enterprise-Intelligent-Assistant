@@ -1,8 +1,8 @@
 import logging
 from collections import deque
-from datetime import datetime, timezone
+from app.timezones import beijing_now
 from threading import Lock
-from uuid import UUID
+from app.ids import ShortId
 
 from app.contracts import RunEvent
 
@@ -19,12 +19,12 @@ class InfrastructureEvents:
         self._sequence = 0
         self._lock = Lock()
 
-    def record(self, trace_id: UUID, event_type: str, data: dict) -> RunEvent:
+    def record(self, trace_id: ShortId, event_type: str, data: dict) -> RunEvent:
         """接收追踪 ID、事件类型及安全数据；追加递增事件并返回事件对象。"""
         with self._lock:
             self._sequence += 1
             event = RunEvent(event_id=self._sequence, trace_id=trace_id,
-                             timestamp=datetime.now(timezone.utc), type=event_type, data=data)
+                             timestamp=beijing_now(), type=event_type, data=data)
             self._events.append(event)
         logger.info(event.model_dump_json())
         return event

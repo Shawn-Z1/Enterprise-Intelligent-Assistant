@@ -1,0 +1,9 @@
+---
+description: 前端日常开发使用本地 Vite 热更新，容器仅用于生产部署或明确的生产验收
+alwaysApply: true
+---
+
+- 遵循项目根目录 AGENTS.md 的前端开发调试约定。
+- 前端日常调试执行 `cd frontend` 后 `npm run dev`，复用已有本地服务。
+- 后端和存储使用 Docker Compose；不要为查看前端效果启动或反复重建 web 容器。
+- 仅在明确进行生产部署或生产验收时启用 production profile。

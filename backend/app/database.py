@@ -3,12 +3,16 @@ import json
 import asyncpg
 
 from app.config import Settings
+from app.timezones import encode_timestamp, decode_timestamp
 
 
 async def configure_connection(connection: asyncpg.Connection) -> None:
     """接收 PG 连接，配置 JSON/JSONB 编解码；后续读写返回原生对象，无返回值。"""
     for kind in ("json", "jsonb"):
         await connection.set_type_codec(kind, schema="pg_catalog", encoder=json.dumps, decoder=json.loads)
+    await connection.execute("SET TIME ZONE 'Asia/Shanghai'")
+    await connection.set_type_codec('timestamptz', schema='pg_catalog', format='tuple',
+                                    encoder=encode_timestamp, decoder=decode_timestamp)
 
 
 async def create_app_pool(settings: Settings) -> asyncpg.Pool:
