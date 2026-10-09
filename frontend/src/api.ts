@@ -70,6 +70,28 @@ export async function apiRequest<T>(path: string, method = 'GET', body?: unknown
   return response.json() as Promise<T>;
 }
 
+/** 接收知识上传表单，同源发送原件与 CSRF，返回逐文件结果，不手动覆盖 multipart 边界。 */
+export async function uploadKnowledge<T>(form: FormData): Promise<T> {
+  const csrf = document.cookie.split('; ').find(item => item.startsWith('zhixing_csrf='))?.split('=').slice(1).join('=') || '';
+  const response = await fetch('/api/knowledge/applications',{method:'POST',credentials:'same-origin',
+    headers:{'X-CSRF-Token':decodeURIComponent(csrf)},body:form});
+  if (!response.ok) {
+    const value = await response.json();
+    throw new ApiError(response.status,value.error.code,value.error.message);
+  }
+  return response.json() as Promise<T>;
+}
+
+/** 接收已鉴权原件或 PNG 路径及取消信号，返回 Blob；错误只显示服务器安全说明。 */
+export async function knowledgeBlob(path: string,signal?: AbortSignal): Promise<Blob> {
+  const response = await fetch(`/api${path}`,{credentials:'same-origin',cache:'no-store',signal});
+  if (!response.ok) {
+    const value = await response.json();
+    throw new ApiError(response.status,value.error.code,value.error.message);
+  }
+  return response.blob();
+}
+
 /** 读取真实依赖状态；参数 signal 可取消请求，返回含逐项探针的就绪响应。 */
 export async function fetchReadiness(signal?: AbortSignal): Promise<Readiness> {
   const response = await fetch('/api/health/ready', { signal, cache: 'no-store' });

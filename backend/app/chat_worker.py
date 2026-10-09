@@ -13,6 +13,8 @@ from app.dependencies import check_dependencies
 from app.events import InfrastructureEvents
 from app.ids import new_id
 from app.model_gateway import ModelGateway
+from app.knowledge_storage import KnowledgeStorage
+from app.knowledge_worker import KnowledgeProcessor
 from app.timezones import beijing_now
 
 logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
@@ -23,7 +25,7 @@ async def heartbeat(settings, pool, audit, stopping: asyncio.Event):
     """接收配置、连接池、审计和停止事件，持续保存北京时间心跳及真实依赖状态；停止后返回。"""
     events,trace_id = InfrastructureEvents(),new_id()
     path,previous = Path(settings.worker_state_path),None
-    await audit.append(trace_id,'service.started',{'service':'worker','milestone':'M04'})
+    await audit.append(trace_id,'service.started',{'service':'worker','milestone':'M05'})
     while not stopping.is_set():
         results = await check_dependencies(settings)
         state = {'timestamp':beijing_now().isoformat(),'pid':os.getpid(),'ready':all(item.status=='ready' for item in results.values()),
@@ -50,6 +52,7 @@ async def run():
     audit = AuditRecorder(pool,'worker',secrets)
     gateway = ModelGateway(settings)
     processor = ChatProcessor(pool,settings,gateway,audit)
+    knowledge = KnowledgeProcessor(pool,settings,KnowledgeStorage(settings),audit)
     stopping = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM,signal.SIGINT):
@@ -57,6 +60,8 @@ async def run():
     health_task = asyncio.create_task(heartbeat(settings,pool,audit,stopping))
     # 执行集合只负责本进程调度，真实任务和租约始终保存在 PG。
     tasks = set()
+    # 两个队列交替优先，持续聊天不会饿死知识解析；共用既有并发上限。
+    prefer_knowledge = True
     try:
         while not stopping.is_set():
             tasks = {task for task in tasks if not task.done()}
@@ -64,10 +69,18 @@ async def run():
                 health_task.result()
                 raise RuntimeError('后台心跳已意外结束')
             await processor.recover()
+            await knowledge.recover()
             if len(tasks)<settings.worker_concurrency:
-                task_run = await processor.claim()
-                if task_run:
-                    tasks.add(asyncio.create_task(processor.process(task_run)))
+                queues = [knowledge,processor] if prefer_knowledge else [processor,knowledge]
+                prefer_knowledge = not prefer_knowledge
+                claimed = False
+                for queue in queues:
+                    task_run = await queue.claim()
+                    if task_run:
+                        tasks.add(asyncio.create_task(queue.process(task_run)))
+                        claimed = True
+                        break
+                if claimed:
                     continue
             try:
                 await asyncio.wait_for(stopping.wait(),timeout=0.3)

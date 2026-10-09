@@ -5,6 +5,7 @@ import { Activity, ArrowRight, ArrowUp, BookOpen, Check, ChevronRight, CircleHel
 import { apiRequest, ApiError, beijingTime, fetchEvents, fetchReadiness, type Conversation, type Readiness, type RunEvent, type UserProfile } from './api';
 import { PersonalCenter, StaffManagement } from './IdentityPages';
 import { ChatWorkspace } from './ChatWorkspace';
+import { KnowledgePage } from './KnowledgePage';
 
 type Page = 'conversation' | 'knowledge' | 'automation' | 'profile' | 'staff' | 'audit';
 const pages = { conversation: '新建对话', knowledge: '知识库管理', automation: '自动化任务流', profile: '个人中心', staff: '职员管理', audit: '调试与审计' };
@@ -199,10 +200,10 @@ export default function App() {
     <div className="main-area"><header className="topbar"><div><button className="mobile-menu" aria-label="展开导航" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(!sidebarOpen)}><Menu size={20} /></button><span>工作空间</span><ChevronRight size={14} /><strong>{pages[page]}</strong></div>
       <div><button className="header-login" onClick={() => void refreshUser()}>刷新资料</button><button className="header-login" onClick={() => void logout().catch(() => {})}>退出登录<ArrowRight size={15} /></button></div></header>
       <main className="workspace-content">
-        {page === 'profile' ? <PersonalCenter user={user} refresh={refreshUser} logout={logout} /> : page === 'staff' && user.role === 'admin' ? <StaffManagement refresh={refreshUser} /> : page === 'conversation' ? <ChatWorkspace key={user.user_id} conversationId={conversationId} revision={chatRevision} userName={user.display_name} select={openConversation} changed={refreshHistory} />
-          : <section className="module-placeholder"><span className="welcome-symbol">{page === 'knowledge' ? <BookOpen size={26} /> : page === 'automation' ? <Workflow size={26} /> : <UserRound size={26} />}</span><h1>{pages[page]}</h1>
-            <p>{page === 'knowledge' ? user.can_use_knowledge ? '已获得知识使用资格，知识提交与文件预览将在 M05 开放。' : '尚未获得知识库权限，请联系管理员分配部门和职级。' : page === 'automation' ? '自动化任务流将在后续版本开放。' : '永久审计已保存，管理员只读查询页面将在后续开放。'}</p>
-            <span className="placeholder-tag"><Check size={14} />{page === 'knowledge' && !user.can_use_knowledge ? '未授权，请联系管理员' : '入口已预留，功能尚未开放'}</span></section>}
+        {page === 'profile' ? <PersonalCenter user={user} refresh={refreshUser} logout={logout} /> : page === 'staff' && user.role === 'admin' ? <StaffManagement refresh={refreshUser} /> : page === 'knowledge' ? <KnowledgePage key={user.user_id} user={user} /> : page === 'conversation' ? <ChatWorkspace key={user.user_id} conversationId={conversationId} revision={chatRevision} userName={user.display_name} select={openConversation} changed={refreshHistory} />
+          : <section className="module-placeholder"><span className="welcome-symbol">{page === 'automation' ? <Workflow size={26} /> : <UserRound size={26} />}</span><h1>{pages[page]}</h1>
+            <p>{page === 'automation' ? '自动化任务流将在后续版本开放。' : '永久审计已保存，管理员只读查询页面将在后续开放。'}</p>
+            <span className="placeholder-tag"><Check size={14} />入口已预留，功能尚未开放</span></section>}
       </main><footer className="workspace-footer"><span>{authError || '当前仅支持文字对话，回答可能有误，重要结论请核实。'}</span><button onClick={() => void openStatus()}><Activity size={18} />运行状态</button></footer>
     </div>{statusPanel}
   </div>;

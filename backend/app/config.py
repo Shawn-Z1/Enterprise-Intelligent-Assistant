@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     run_timeout_seconds: int = Field(default=240,ge=5,le=900)
     worker_concurrency: int = Field(default=2,ge=1,le=4)
     run_lease_seconds: int = Field(default=60,ge=20,le=300)
+    knowledge_max_file_bytes: int = Field(default=20*1024*1024,ge=1024,le=50*1024*1024)
+    knowledge_max_batch_bytes: int = Field(default=50*1024*1024,ge=1024,le=200*1024*1024)
+    knowledge_max_files: int = Field(default=10,ge=1,le=30)
+    knowledge_parse_timeout_seconds: int = Field(default=30,ge=2,le=120)
 
 
 @lru_cache

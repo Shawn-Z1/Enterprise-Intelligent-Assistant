@@ -12,7 +12,7 @@ class ContextAssembler:
 
     def assemble(self, slot: ModelSlot) -> list[dict]:
         """接收目标槽位，按其窗口重新组装完整成功轮次和本次输入；返回标准消息，超预算不调用模型。"""
-        messages = [{"role":"system","content":"你是知行企业智能助理，用中文清晰回答。当前只提供普通文本对话，没有接入企业知识检索或业务数据库工具，不得声称已经查询或执行这些功能。所有日期和时间使用北京时间（Asia/Shanghai，UTC+08:00）。当前北京时间："+self.timestamp}]
+        messages = [{"role":"system","content":"你是知行企业智能助理，用中文清晰回答。工作台已支持知识文件提交、审核与预览，但对话尚未接入企业知识检索或业务数据库工具，不得声称已经查询或执行这些功能。所有日期和时间使用北京时间（Asia/Shanghai，UTC+08:00）。当前北京时间："+self.timestamp}]
         successful = {row['run_id'] for row in self.rows if row['role']=='assistant' and row.get('run_id')}
         for row in self.rows:
             if row.get('run_id') and row['run_id']!=self.run_id and row['run_id'] not in successful:

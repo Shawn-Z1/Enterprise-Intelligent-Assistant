@@ -8,3 +8,7 @@ minio==7.2.20
 pymilvus==2.5.18
 httpx==0.28.1
 argon2-cffi==25.1.0
+python-multipart==0.0.32
+python-docx==1.2.0
+pypdfium2==5.14.0
+Pillow==12.3.0

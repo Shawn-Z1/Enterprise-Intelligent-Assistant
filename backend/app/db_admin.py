@@ -109,7 +109,7 @@ async def grant_runtime_access(conn: asyncpg.Connection, settings: BootstrapSett
     await conn.execute(f"REVOKE ALL ON app_system.schema_migrations,app_system.seed_receipts FROM {app_role}")
     await conn.execute(f"GRANT SELECT ON app_system.schema_migrations TO {app_role}")
     for table in ("app_runtime.messages", "app_runtime.run_events", "app_runtime.checkpoints",
-                  "app_runtime.context_summaries", "app_knowledge.reviews", "app_memory.extractions", "app_memory.snapshots"):
+                  "app_runtime.context_summaries", "app_knowledge.reviews", "app_knowledge.parses", "app_memory.extractions", "app_memory.snapshots"):
         await conn.execute(f"REVOKE UPDATE ON {table} FROM {app_role}")
     await conn.execute(f"GRANT SELECT,INSERT ON ALL TABLES IN SCHEMA app_audit TO {app_role}")
     await conn.execute(f"GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA {app_schemas},app_audit TO {app_role}")
