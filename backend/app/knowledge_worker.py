@@ -8,13 +8,15 @@ from app.knowledge_service import KnowledgeService, INACTIVE, fingerprint
 
 
 class KnowledgeProcessor:
-    """后台只解析预览和已批准原件；M05 永不插入正式切片、向量或可检索状态。"""
+    """后台处理预览、已批准原件及独立索引任务，未经批准不产生切片或向量。"""
 
-    def __init__(self,pool,settings,storage,audit):
+    def __init__(self,pool,settings,storage,audit,indexer=None):
         """接收受限数据库、限制配置、原件存储和审计，初始化 worker 标识与公共知识服务。"""
         self.pool,self.settings,self.storage,self.audit = pool,settings,storage,audit
         self.worker_id = new_id()
         self.service = KnowledgeService(pool,storage,audit)
+        # 生产 worker 提供真实索引器；M05 隔离回归仅验证审批与解析，不执行后续阶段。
+        self.indexer = indexer
 
     async def valid(self,conn,row,job) -> bool:
         """接收事务、当前材料和任务，复检状态、指纹、正式文档及原批准；返回任务是否仍可继续。"""
@@ -82,7 +84,7 @@ class KnowledgeProcessor:
                 await conn.execute("UPDATE app_knowledge.jobs SET lease_until=now()+$1*interval '1 second' WHERE job_id=$2 AND lease_owner=$3 AND status='running'",self.settings.run_lease_seconds,job['job_id'],self.worker_id)
 
     async def finish(self,job,result):
-        """接收任务与解析内容，再次锁定和校验批准，保存不可变解析并标待索引；删除任务只完成失效状态。"""
+        """接收任务与真实处理结果，再次校验批准后保存解析或标索引就绪；删除任务完成失效状态。"""
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 row = dict(await conn.fetchrow('SELECT * FROM app_knowledge.applications WHERE application_id=$1 FOR UPDATE',job['application_id']))
@@ -93,8 +95,12 @@ class KnowledgeProcessor:
                     await self.invalidate(conn,row,job,{'code':'APPROVAL_CHANGED','message':'材料、权限或批准已变化，晚到任务不能发布'})
                     return
                 if job['job_type']=='delete':
-                    await conn.execute("UPDATE app_knowledge.applications SET status='invalidated',updated_at=now() WHERE application_id=$1",row['application_id'])
+                    await conn.execute("UPDATE app_knowledge.applications SET status='invalidated',error_json=NULL,updated_at=now() WHERE application_id=$1",row['application_id'])
                     kind = 'knowledge.deleted'
+                elif job['job_type'] in ('index','reindex'):
+                    await conn.execute("UPDATE app_knowledge.applications SET status='retrievable',updated_at=now() WHERE application_id=$1", row['application_id'])
+                    await conn.execute("UPDATE app_knowledge.documents SET status='retrievable' WHERE document_id=$1", job['document_id'])
+                    kind = 'knowledge.indexed'
                 else:
                     parse_id = new_id()
                     await conn.execute('''INSERT INTO app_knowledge.parses(parse_id,application_id,fingerprint,source_sha256,content_json)
@@ -103,10 +109,13 @@ class KnowledgeProcessor:
                     if job['job_type']=='publish':
                         await conn.execute("UPDATE app_knowledge.applications SET status='pending_index' WHERE application_id=$1",row['application_id'])
                         await conn.execute("UPDATE app_knowledge.documents SET status='pending_index' WHERE document_id=$1",job['document_id'])
+                        if self.indexer:
+                            await self.service.add_job(conn,row,'index',job['trace_id'],job['document_id'])
                     kind = 'knowledge.parsed_pending_index' if job['job_type']=='publish' else 'knowledge.preview_parsed'
                 await conn.execute("UPDATE app_knowledge.jobs SET status='completed',lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE job_id=$1",job['job_id'])
                 await self.service.event(conn,job['trace_id'],kind,row,{'job_id':job['job_id'],'document_id':job['document_id'],
-                    'page_count':result.get('page_count') if result else None,'characters':len(result.get('text','')) if result else None,'indexing_performed':False})
+                    'page_count':result.get('page_count') if result else None,'characters':len(result.get('text','')) if result else None,'indexing_performed':job['job_type'] in ('index','reindex'),
+                    'index':result if job['job_type'] in ('index','reindex') else None})
 
     async def failed(self,job,error):
         """接收失败任务和安全错误，保存明确失败；原件变化使批准失效，已撤回或已删除的任务不覆盖状态。"""
@@ -114,14 +123,19 @@ class KnowledgeProcessor:
             async with conn.transaction():
                 row = dict(await conn.fetchrow('SELECT * FROM app_knowledge.applications WHERE application_id=$1 FOR UPDATE',job['application_id']))
                 state = await conn.fetchval('SELECT status FROM app_knowledge.jobs WHERE job_id=$1',job['job_id'])
-                if state!='running' or row['status'] in INACTIVE:
+                if state!='running' or (row['status'] in INACTIVE and job['job_type']!='delete'):
+                    return
+                if job['job_type']=='delete':
+                    await conn.execute("UPDATE app_knowledge.jobs SET status='failed',error_json=$1,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE job_id=$2",error,job['job_id'])
+                    await conn.execute('UPDATE app_knowledge.applications SET error_json=$1,updated_at=now() WHERE application_id=$2',error,row['application_id'])
+                    await self.service.event(conn,job['trace_id'],'knowledge.delete_failed',row,{'job_id':job['job_id'],'error':error})
                     return
                 if error['code']=='SOURCE_CHANGED':
                     await self.invalidate(conn,row,job,error)
                     return
                 await conn.execute("UPDATE app_knowledge.jobs SET status='failed',error_json=$1,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE job_id=$2",error,job['job_id'])
                 await conn.execute("UPDATE app_knowledge.applications SET parse_status='failed',error_json=$1,updated_at=now() WHERE application_id=$2",error,row['application_id'])
-                if job['job_type']=='publish':
+                if job['job_type'] in ('publish','index','reindex'):
                     await conn.execute("UPDATE app_knowledge.applications SET status='failed' WHERE application_id=$1",row['application_id'])
                     await conn.execute("UPDATE app_knowledge.documents SET status='failed' WHERE document_id=$1",job['document_id'])
                 await self.service.event(conn,job['trace_id'],'knowledge.processing_failed',row,{'job_id':job['job_id'],'error':error})
@@ -134,10 +148,12 @@ class KnowledgeProcessor:
             await self.failed(dict(row),{'code':'JOB_INTERRUPTED','message':'后台进程中断，可检查原件后重试'})
 
     async def process(self,job):
-        """接收已领取任务，核验原件后解析并再次检查批准；任何失败都有明确状态，不执行嵌入或索引。"""
+        """接收已领取任务，复检原件/批准后解析或构建真实索引，只有全部完成才标可检索，失败明确终止。"""
         renewal = asyncio.create_task(self.renew(job,asyncio.current_task()))
         try:
             if job['job_type']=='delete':
+                if self.indexer:
+                    await self.indexer.remove(job['application_id'])
                 await self.finish(job,None)
                 return
             async with self.pool.acquire() as conn:
@@ -145,13 +161,35 @@ class KnowledgeProcessor:
                 cached = await conn.fetchval('SELECT content_json FROM app_knowledge.parses WHERE application_id=$1 AND fingerprint=$2',row['application_id'],job['expected_fingerprint'])
             data = await self.storage.read_verified(row)
             parsed = cached or await self.storage.parse(data,row['file_format'])
+            if job['job_type'] in ('index','reindex'):
+                if self.indexer is None:
+                    raise RuntimeError('真实检索索引器未配置')
+                # 老 DOCX 解析未保存大纲级别，重建时从原件重新读取元数据；原始不可变解析档案不覆盖。
+                if row['file_format']=='docx' and any(block['type']=='paragraph' and 'heading_level' not in block for block in parsed.get('blocks',[])):
+                    parsed=await self.storage.parse(data,'docx')
+                parsed = await self.indexer.build(row,parsed,job,self.valid)
             await self.storage.read_verified(row)
             await self.finish(job,parsed)
+            # 任务已提交终态，不应由续租协程把后续旧索引清理误判成外部取消。
+            renewal.cancel()
+            await asyncio.gather(renewal,return_exceptions=True)
+            if self.indexer and job['job_type'] in ('index','reindex') and parsed.get('previous_collection'):
+                try:
+                    await self.indexer.index.delete_document(job['document_id'],parsed['previous_collection'])
+                except Exception as error:
+                    await self.audit.append(job['trace_id'],'knowledge.old_index_cleanup_failed',
+                        {'document_id':job['document_id'],'collection':parsed['previous_collection'],'error_type':type(error).__name__},user_id=row['creator_user_id'])
         except asyncio.CancelledError:
             await self.failed(job,{'code':'JOB_INTERRUPTED','message':'任务已停止或后台中断'})
         except Exception as error:
             detail = error.detail if isinstance(error,HTTPException) and isinstance(error.detail,dict) else {'code':'KNOWLEDGE_PROCESSING_ERROR','message':'文件处理或存储失败，请检查原件后重试'}
             await self.failed(job,detail)
         finally:
+            # 删除/撤回/批准失效期间的晚到写入必须清理，PG 状态始终先阻止召回。
+            if self.indexer and job['job_type'] in ('index','reindex'):
+                async with self.pool.acquire() as conn:
+                    state = await conn.fetchval('SELECT status FROM app_knowledge.applications WHERE application_id=$1',job['application_id'])
+                if state in INACTIVE:
+                    await self.indexer.remove(job['application_id'])
             renewal.cancel()
             await asyncio.gather(renewal,return_exceptions=True)

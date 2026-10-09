@@ -51,6 +51,15 @@ class Settings(BaseSettings):
     knowledge_max_batch_bytes: int = Field(default=50*1024*1024,ge=1024,le=200*1024*1024)
     knowledge_max_files: int = Field(default=10,ge=1,le=30)
     knowledge_parse_timeout_seconds: int = Field(default=30,ge=2,le=120)
+    retrieval_model_url: str = 'http://retrieval-models:8090'
+    rag_collection_prefix: str = 'knowledge_chunks'
+    rag_chunk_size: int = Field(default=600, ge=100, le=600)
+    rag_chunk_overlap: int = Field(default=0, ge=0, le=0)
+    rag_recall_limit: int = Field(default=20, ge=1, le=50)
+    rag_rerank_limit: int = Field(default=20, ge=1, le=32)
+    rag_final_limit: int = Field(default=5, ge=1, le=10)
+    rag_min_score: float = Field(default=0.3, ge=0, le=1)
+    rag_rrf_k: int = Field(default=60, ge=1, le=200)
 
 
 @lru_cache

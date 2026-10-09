@@ -35,6 +35,14 @@ x-backend-env: &backend-env
   KNOWLEDGE_MAX_BATCH_BYTES: ${KNOWLEDGE_MAX_BATCH_BYTES:-52428800}
   KNOWLEDGE_MAX_FILES: ${KNOWLEDGE_MAX_FILES:-10}
   KNOWLEDGE_PARSE_TIMEOUT_SECONDS: ${KNOWLEDGE_PARSE_TIMEOUT_SECONDS:-30}
+  RETRIEVAL_MODEL_URL: http://retrieval-models:8090
+  RAG_CHUNK_SIZE: ${RAG_CHUNK_SIZE:-600}
+  RAG_CHUNK_OVERLAP: "0"
+  RAG_RECALL_LIMIT: ${RAG_RECALL_LIMIT:-20}
+  RAG_RERANK_LIMIT: ${RAG_RERANK_LIMIT:-20}
+  RAG_FINAL_LIMIT: ${RAG_FINAL_LIMIT:-5}
+  RAG_MIN_SCORE: ${RAG_MIN_SCORE:-0.3}
+  RAG_RRF_K: ${RAG_RRF_K:-60}
   SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
   SESSION_HOURS: ${SESSION_HOURS:-24}
   LOGIN_LIMIT_PER_MINUTE: ${LOGIN_LIMIT_PER_MINUTE:-20}
@@ -48,8 +56,46 @@ x-app-dependencies: &app-dependencies
     condition: service_healthy
   minio-init:
     condition: service_completed_successfully
+  retrieval-models:
+    condition: service_healthy
 
 services:
+  # 一次性下载固定模型到持久权重卷；文件哈希一致时不会重复下载。
+  models-init:
+    image: zhixing-retrieval-models:0.6.1
+    build: ./retrieval_models
+    user: "0:0"
+    command: ["python", "download.py"]
+    environment:
+      TZ: Asia/Shanghai
+      MODEL_DOWNLOAD_ENDPOINT: ${MODEL_DOWNLOAD_ENDPOINT:-https://huggingface.co}
+    volumes:
+      - retrieval-model-cache:/models
+    restart: "no"
+
+  retrieval-models:
+    image: zhixing-retrieval-models:0.6.1
+    build: ./retrieval_models
+    environment:
+      TZ: Asia/Shanghai
+      MODEL_CPU_THREADS: "2"
+    volumes:
+      - retrieval-model-cache:/models:ro
+    read_only: true
+    tmpfs: [/tmp]
+    cpus: 2
+    mem_limit: 3g
+    depends_on:
+      models-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/ready',timeout=5)"]
+      interval: 15s
+      timeout: 8s
+      retries: 4
+      start_period: 120s
+    restart: unless-stopped
+
   # 默认开发不启动前端容器；生产时显式启用 production profile。
   web:
     profiles: ["production"]
@@ -70,7 +116,7 @@ services:
 
   api:
     build: ./backend
-    image: zhixing-backend:0.5.0
+    image: zhixing-backend:0.6.1
     environment: *backend-env
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
@@ -84,7 +130,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: zhixing-backend:0.5.0
+    image: zhixing-backend:0.6.1
     build: ./backend
     command: ["python", "-m", "app.worker"]
     environment: *backend-env
@@ -100,7 +146,7 @@ services:
   # 显式管理任务：外置迁移和种子只读挂载，不在应用启动时自动导入。
   db-admin:
     profiles: ["tools"]
-    image: zhixing-backend:0.5.0
+    image: zhixing-backend:0.6.1
     build: ./backend
     entrypoint: ["python", "-m", "app.db_admin"]
     environment:
@@ -259,6 +305,7 @@ networks:
     name: zhixing-network
 
 volumes:
+  retrieval-model-cache:
   postgres-data:
   redis-data:
   etcd-data:

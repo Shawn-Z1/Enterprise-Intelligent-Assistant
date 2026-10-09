@@ -3,6 +3,7 @@ from time import perf_counter
 from typing import Awaitable, Callable
 
 import asyncpg
+import httpx
 import urllib3
 from minio import Minio
 from pymilvus import MilvusClient
@@ -37,6 +38,17 @@ async def check_redis(settings: Settings) -> str:
         return "PING / PONG 成功"
     finally:
         await client.aclose()
+
+
+async def check_retrieval_models(settings: Settings) -> str:
+    """接收配置，实际读取固定 CPU 模型就绪接口，返回空间及执行器；模型不可用则整体不就绪。"""
+    async with httpx.AsyncClient(timeout=settings.dependency_timeout_seconds,trust_env=False) as client:
+        response=await client.get(settings.retrieval_model_url+'/ready')
+        response.raise_for_status()
+        value=response.json()
+        if value['status']!='ready' or not all('CPUExecutionProvider' in providers for providers in value['providers'].values()):
+            raise RuntimeError('CPU 检索模型尚未就绪')
+        return '真实 CPU Embedding/rerank 就绪，空间 '+value['space']
 
 
 def probe_milvus(settings: Settings) -> str:
@@ -80,13 +92,14 @@ async def measure(name: str, target: str, probe: Callable[[], Awaitable[str]], t
 
 
 async def check_dependencies(settings: Settings) -> dict[str, DependencyStatus]:
-    """接收配置并并发验证四种真实依赖；返回按服务名索引的探针结果。"""
+    """接收配置并发验证存储与真实检索模型五种依赖；返回按服务名索引的探针结果。"""
     # 探针绑定容器服务名，避免将容器自己的 localhost 当作其他服务。
     probes = [
         ("postgres", f"{settings.postgres_host}:{settings.postgres_port}", lambda: check_postgres(settings)),
         ("redis", f"{settings.redis_host}:{settings.redis_port}", lambda: check_redis(settings)),
         ("milvus", f"{settings.milvus_host}:{settings.milvus_port}", lambda: asyncio.to_thread(probe_milvus, settings)),
         ("minio", settings.app_minio_endpoint, lambda: asyncio.to_thread(probe_minio, settings)),
+        ("retrieval_models", settings.retrieval_model_url, lambda: check_retrieval_models(settings)),
     ]
     results = await asyncio.gather(*(measure(name, target, probe, settings.dependency_timeout_seconds + 1)
                                      for name, target, probe in probes))

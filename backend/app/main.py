@@ -17,6 +17,8 @@ from app.identity_routes import router as identity_router
 from app.chat_routes import router as chat_router
 from app.knowledge_routes import router as knowledge_router
 from app.knowledge_storage import KnowledgeStorage
+from app.rag_index import RagIndex
+from app.rag_service import RagService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logging.getLogger('httpx').setLevel(logging.WARNING)
@@ -29,22 +31,25 @@ async def lifespan(app: FastAPI):
     app.state.events = InfrastructureEvents()
     app.state.pool = await create_app_pool(app.state.settings)
     app.state.knowledge_storage = KnowledgeStorage(app.state.settings)
+    app.state.rag_index = RagIndex(app.state.settings)
     app.state.audit = AuditRecorder(app.state.pool, "api", (
         app.state.settings.postgres_password.get_secret_value(),
         app.state.settings.business_db_password.get_secret_value(),
         app.state.settings.app_minio_secret_key.get_secret_value(),
         app.state.settings.primary_api_key.get_secret_value(),
         app.state.settings.fallback_api_key.get_secret_value()))
+    app.state.rag = RagService(app.state.pool,app.state.settings,app.state.rag_index,app.state.knowledge_storage,app.state.audit)
     try:
         trace_id = new_id()
-        await app.state.audit.append(trace_id, "service.started", {"service": "api", "milestone": "M05"})
-        app.state.events.record(trace_id, "service.started", {"service": "api", "milestone": "M05"})
+        await app.state.audit.append(trace_id, "service.started", {"service": "api", "milestone": "M06"})
+        app.state.events.record(trace_id, "service.started", {"service": "api", "milestone": "M06"})
         yield
     finally:
+        await app.state.rag_index.close()
         await app.state.pool.close()
 
 
-app = FastAPI(title="知行企业智能助理", version="0.5.0", lifespan=lifespan,
+app = FastAPI(title="知行企业智能助理", version="0.6.1", lifespan=lifespan,
               docs_url="/api/docs", openapi_url="/api/openapi.json", redoc_url=None)
 app.include_router(identity_router)
 app.include_router(chat_router)
@@ -129,7 +134,7 @@ async def unexpected_error(request: Request, error: Exception):
 @app.get("/api/health/live")
 async def live(request: Request):
     """接收请求；仅返回 API 进程存活状态，不将它宣称为依赖就绪。"""
-    return {"status": "alive", "service": "api", "milestone": "M05", "trace_id": str(request.state.trace_id)}
+    return {"status": "alive", "service": "api", "milestone": "M06", "trace_id": str(request.state.trace_id)}
 
 
 @app.get("/api/health/ready")

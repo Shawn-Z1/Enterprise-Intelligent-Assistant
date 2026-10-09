@@ -150,11 +150,11 @@ async def update_staff(user_id: ShortId,body: StaffUpdate,request: Request,conte
 
 @router.post("/tools/search_knowledge")
 async def knowledge_gate(body: ToolRequest,request: Request,context: AuthContext = Depends(mutation_context)):
-    """接收问题与当前身份，在任何检索前校验资格；合法用户明确提示 M06 尚未接入。"""
+    """接收问题与当前身份，在任何召回前校验资格并执行真实混合 RAG，返回有权访问的来源。"""
     if not context.can_use_knowledge:
         await security_event(request,"permissions.denied",{"capability":"knowledge"},context)
         raise auth_error(403,"KNOWLEDGE_NOT_AUTHORIZED","尚未获得知识库权限，请联系管理员分配部门和职级")
-    raise auth_error(501,"FEATURE_NOT_READY","知识检索将在后续阶段开放")
+    return await request.app.state.rag.search(body.question,context,request.state.trace_id)
 
 
 @router.get("/admin/audit/status")
@@ -186,12 +186,19 @@ async def conversation(conversation_id: ShortId,request: Request,context: AuthCo
         owned = await conn.fetchrow("SELECT conversation_id,title FROM app_runtime.conversations WHERE conversation_id=$1 AND user_id=$2",conversation_id,context.user_id)
         if owned is not None:
             messages = await conn.fetch("""SELECT m.message_id,m.role,m.content,m.created_at,m.message_order,m.run_id,r.status AS run_status,
-                r.state_json->'error' AS error,m.protocol_json->>'model' AS model,m.protocol_json->'usage' AS usage,m.protocol_json->>'finish_reason' AS finish_reason
+                r.state_json->'error' AS error,m.protocol_json->>'model' AS model,m.protocol_json->'usage' AS usage,m.protocol_json->>'finish_reason' AS finish_reason,
+                m.protocol_json->'message'->'citations' AS citations
                 FROM app_runtime.messages m LEFT JOIN app_runtime.runs r ON r.run_id=m.run_id
                 WHERE m.conversation_id=$1 AND m.user_id=$2 ORDER BY m.message_order""",conversation_id,context.user_id)
             active = await conn.fetchrow("SELECT run_id,trace_id,status,created_at,updated_at FROM app_runtime.runs WHERE conversation_id=$1 AND user_id=$2 AND status IN ('pending','running') ORDER BY created_at DESC LIMIT 1",conversation_id,context.user_id)
             last_run = await conn.fetchrow("SELECT run_id,trace_id,conversation_id,status,created_at,updated_at,state_json->'error' AS error FROM app_runtime.runs WHERE conversation_id=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT 1",conversation_id,context.user_id)
-            return {**dict(owned),"messages":[dict(row) for row in messages],"active_run":dict(active) if active else None,"last_run":dict(last_run) if last_run else None}
+            public_messages = []
+            for message in messages:
+                value = dict(message)
+                # 原引用档案保留，但历史接口不重放受限正文；点击来源时重新请求当前鉴权接口。
+                value['citations'] = [{key:item.get(key) for key in ('label','chunk_id','document_id','filename','page','page_numbers','heading','heading_path','position')} for item in (value['citations'] or [])]
+                public_messages.append(value)
+            return {**dict(owned),"messages":public_messages,"active_run":dict(active) if active else None,"last_run":dict(last_run) if last_run else None}
     await security_event(request,"resources.access_rejected",{"resource":"conversation","resource_id":str(conversation_id)},context)
     raise auth_error(404,"NOT_FOUND","会话不存在或不可访问")
 

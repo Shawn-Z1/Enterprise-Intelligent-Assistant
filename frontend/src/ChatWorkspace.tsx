@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { ArrowUp, Check, MessageSquare, Pencil, Square, X } from 'lucide-react';
-import { apiRequest, beijingTime, requestId, type ChatEvent, type ChatMessage, type ChatRun, type Conversation, type ConversationDetail } from './api';
+import { apiRequest, beijingTime, requestId, citationPages, type ChatEvent, type ChatMessage, type ChatRun, type Conversation, type ConversationDetail, type Citation } from './api';
+import { SourcePanel } from './SourcePanel';
 
 interface Props { conversationId: string | null; revision: number; userName: string; select: (id: string) => void; changed: () => Promise<void>; }
 const labels = {pending:'等待处理',running:'正在回答',completed:'回答完成',failed:'回答失败',cancelled:'已停止',interrupted:'执行中断'};
@@ -21,6 +22,8 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
   const [renaming,setRenaming] = useState(false);
   const [newTitle,setNewTitle] = useState('');
   const [renameBusy,setRenameBusy] = useState(false);
+  const [citation,setCitation] = useState<Citation | null>(null);
+  const closeSource=useCallback(()=>setCitation(null),[]);
   // 同一条未成功确认的发送重用标识，网络重传不能生成第二个模型任务。
   const pendingKey = useRef<{content: string; conversation: string | null; key: string} | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
@@ -38,7 +41,7 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
 
   useEffect(() => {
     let alive = true;
-    setError(''); setMessages([]); setRun(null); setLiveText(''); setEvents([]); setStage(''); setRenaming(false); setDraft(''); setLoading(false);
+    setError(''); setMessages([]); setRun(null); setLiveText(''); setEvents([]); setStage(''); setRenaming(false); setDraft(''); setLoading(false);setCitation(null);
     pendingKey.current = null; pinned.current = true;
     if (!conversationId) { setTitle('新对话'); return; }
     setLoading(true);
@@ -134,15 +137,16 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
     finally { setRenameBusy(false); }
   }
 
-  return <div className="chat-workspace">
-    <div className="chat-heading"><div><h1>{title}</h1><p>普通文本对话</p></div>
+  return <div className={`chat-with-sources ${citation ? 'has-source' : ''}`}><div className="chat-workspace">
+    <div className="chat-heading"><div><h1>{title}</h1><p>工作对话</p></div>
       {conversationId && <button className="rename-chat" aria-label="重命名会话" onClick={() => {setNewTitle(title);setRenaming(true);}}><Pencil size={18} />重命名</button>}</div>
     {renaming && <form className="rename-form" onSubmit={rename}><label htmlFor="conversation-title">会话名称</label><input id="conversation-title" autoFocus maxLength={120} value={newTitle} onChange={event => setNewTitle(event.target.value)} /><button disabled={renameBusy || !newTitle.trim()}><Check size={18} />保存</button><button type="button" disabled={renameBusy} onClick={() => setRenaming(false)}><X size={18} />取消</button></form>}
     <div className="chat-scroll" ref={viewport} onScroll={() => {const node=viewport.current;if(node)pinned.current=node.scrollHeight-node.scrollTop-node.clientHeight<80;}}>
-      {loading ? <p role="status">正在读取已保存的会话…</p> : messages.length===0 && !busy ? <div className="chat-empty"><MessageSquare size={32} aria-hidden="true" /><h2>{userName}，从一个问题开始。</h2><p>讨论工作思路、解释概念，或整理你提供的文字。<br />企业知识检索和业务查询将在后续开放。</p></div> : null}
+      {loading ? <p role="status">正在读取已保存的会话…</p> : messages.length===0 && !busy ? <div className="chat-empty"><MessageSquare size={32} aria-hidden="true" /><h2>{userName}，从一个问题开始。</h2><p>讨论工作思路，或查询你有权访问的企业知识。<br />回答引用可打开原文，核实页码与依据。</p></div> : null}
       {messages.map(message => <article className={`chat-message ${message.role}`} key={message.message_id}>
         <div className="message-meta"><strong>{message.role==='user' ? '你' : '知行'}</strong><time dateTime={message.created_at}>{beijingTime(message.created_at)}</time></div>
         <div className="message-content">{message.content}</div>
+        {!!message.citations?.length && <div className="message-sources" aria-label="回答引用">{message.citations.map(source=><button key={source.label} onClick={()=>setCitation(source)} aria-label={`来源 ${source.label} ${source.filename}`}>[{source.label}] {source.filename}{citationPages(source) ? ` · ${citationPages(source)}` : ''}</button>)}</div>}
         {message.finish_reason==='length' && <p className="message-limit-note">达到单次输出上限，可继续提问。</p>}
         {message.role==='user' && message.error && <p className="run-error">{message.error.message}</p>}
       </article>)}
@@ -157,5 +161,5 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
         <div><span>Enter 发送，Shift+Enter 换行</span>{busy ? <button type="button" aria-label="停止回答" disabled={stopping || sending} onClick={() => void stop()}><Square size={18} /></button> : <button aria-label="发送消息" disabled={!draft.trim() || loading || sending}><ArrowUp size={20} /></button>}</div>
       </div>
     </form>
-  </div>;
+  </div>{citation && <SourcePanel key={citation.chunk_id} citation={citation} close={closeSource}/>}</div>;
 }

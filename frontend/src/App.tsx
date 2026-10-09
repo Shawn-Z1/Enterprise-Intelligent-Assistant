@@ -141,7 +141,7 @@ export default function App() {
     <p className="status-detail" role="status">{statusLabel}</p>
     {healthError && <p className="error-text">{healthError}</p>}
     {health && Object.entries(health.dependencies).map(([name, dependency]) => <div className="dependency" key={name}>
-      <div><strong>{name === 'postgres' ? 'PostgreSQL' : name === 'minio' ? 'MinIO' : name === 'redis' ? 'Redis' : 'Milvus'}</strong>
+      <div><strong>{name === 'postgres' ? 'PostgreSQL' : name === 'minio' ? 'MinIO' : name === 'redis' ? 'Redis' : name === 'retrieval_models' ? '检索模型' : 'Milvus'}</strong>
         <span className={dependency.status === 'ready' ? 'healthy-text' : 'error-text'}>{dependency.status === 'ready' ? '已连通' : '不可用'}</span></div>
       <code>{dependency.target}</code><p>{dependency.detail}</p><small>{dependency.latency_ms} ms</small>
     </div>)}

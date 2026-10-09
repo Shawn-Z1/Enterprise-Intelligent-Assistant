@@ -15,6 +15,10 @@ from app.ids import new_id
 from app.model_gateway import ModelGateway
 from app.knowledge_storage import KnowledgeStorage
 from app.knowledge_worker import KnowledgeProcessor
+from app.rag_index import RagIndex
+from app.rag_service import RagService
+from app.knowledge_indexer import KnowledgeIndexer
+from app.rag_contract import INDEX_VERSION
 from app.timezones import beijing_now
 
 logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
@@ -25,7 +29,7 @@ async def heartbeat(settings, pool, audit, stopping: asyncio.Event):
     """接收配置、连接池、审计和停止事件，持续保存北京时间心跳及真实依赖状态；停止后返回。"""
     events,trace_id = InfrastructureEvents(),new_id()
     path,previous = Path(settings.worker_state_path),None
-    await audit.append(trace_id,'service.started',{'service':'worker','milestone':'M05'})
+    await audit.append(trace_id,'service.started',{'service':'worker','milestone':'M06'})
     while not stopping.is_set():
         results = await check_dependencies(settings)
         state = {'timestamp':beijing_now().isoformat(),'pid':os.getpid(),'ready':all(item.status=='ready' for item in results.values()),
@@ -51,8 +55,12 @@ async def run():
         settings.app_minio_secret_key,settings.primary_api_key,settings.fallback_api_key))
     audit = AuditRecorder(pool,'worker',secrets)
     gateway = ModelGateway(settings)
-    processor = ChatProcessor(pool,settings,gateway,audit)
-    knowledge = KnowledgeProcessor(pool,settings,KnowledgeStorage(settings),audit)
+    index = RagIndex(settings)
+    storage = KnowledgeStorage(settings)
+    rag = RagService(pool,settings,index,storage,audit)
+    processor = ChatProcessor(pool,settings,gateway,audit,rag=rag)
+    knowledge = KnowledgeProcessor(pool,settings,storage,audit,KnowledgeIndexer(pool,settings,index,audit))
+    await queue_existing_approved(pool,knowledge)
     stopping = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM,signal.SIGINT):
@@ -94,4 +102,22 @@ async def run():
         health_task.cancel()
         await asyncio.gather(health_task,return_exceptions=True)
         await gateway.close()
+        await index.close()
         await pool.close()
+
+
+async def queue_existing_approved(pool,knowledge):
+    """接收应用池和知识处理器，给第五阶段已批准待索引文档补排真实索引任务，不改变原件或旧审核。"""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            rows = await conn.fetch("""SELECT a.*,d.document_id,d.index_version FROM app_knowledge.applications a JOIN app_knowledge.documents d USING(application_id)
+                WHERE (a.status='pending_index' AND d.status='pending_index') OR (a.status='retrievable' AND d.status='retrievable' AND d.index_version<$1)
+                FOR UPDATE OF a""",INDEX_VERSION)
+            for row in rows:
+                kind='reindex' if row['index_version'] is not None and row['index_version']<INDEX_VERSION else 'index'
+                if not await conn.fetchval("SELECT EXISTS(SELECT 1 FROM app_knowledge.jobs WHERE application_id=$1 AND job_type=$2 AND status IN ('pending','running'))",row['application_id'],kind):
+                    trace_id = new_id()
+                    await knowledge.service.add_job(conn,dict(row),kind,trace_id,row['document_id'])
+                    await conn.execute("UPDATE app_knowledge.applications SET status='pending_index',updated_at=now() WHERE application_id=$1",row['application_id'])
+                    await conn.execute("UPDATE app_knowledge.documents SET status='pending_index' WHERE document_id=$1",row['document_id'])
+                    await knowledge.service.event(conn,trace_id,'knowledge.index_queued',dict(row),{'origin':'chunk_policy_upgrade' if kind=='reindex' else 'pending_index','target_index_version':INDEX_VERSION})

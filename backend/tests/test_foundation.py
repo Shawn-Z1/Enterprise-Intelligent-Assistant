@@ -57,7 +57,7 @@ class FoundationTests(unittest.TestCase):
         self.assertTrue(all(event.timestamp.utcoffset().total_seconds() == 8*3600 for event in stored))
 
     def test_live_and_real_readiness(self):
-        """实际访问四种 Compose 依赖并核对追踪头；无参数，无返回值。"""
+        """实际访问存储与检索模型五种 Compose 依赖并核对追踪头；无参数，无返回值。"""
         with TestClient(app) as client:
             live = client.get("/api/health/live")
             self.assertEqual(live.status_code, 200)
@@ -66,7 +66,7 @@ class FoundationTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["trace_id"], response.headers["X-Trace-ID"])
             self.assertRegex(response.json()["trace_id"], r"^[A-Za-z0-9_-]{16}$")
-            self.assertEqual(set(response.json()["dependencies"]), {"postgres", "redis", "milvus", "minio"})
+            self.assertEqual(set(response.json()["dependencies"]), {"postgres", "redis", "milvus", "minio", "retrieval_models"})
             self.assertTrue(all(item["status"] == "ready" for item in response.json()["dependencies"].values()))
             events = client.get("/api/events").json()
             self.assertFalse(events["durable"])

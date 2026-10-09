@@ -50,7 +50,7 @@ def metadata(row: dict,context) -> dict:
                  can_delete=bool(active and context.can_use_knowledge),
                  can_withdraw=bool(row['status']=='pending_review' and context.can_use_knowledge),
                  can_review=bool(active and context.is_admin and row['status']=='pending_review'),
-                 can_retry=bool(context.can_use_knowledge and (row['parse_status']=='failed' and row['status']=='pending_review' or context.is_admin and row['status']=='failed')),
+                 can_retry=bool(context.can_use_knowledge and (row['parse_status']=='failed' and row['status']=='pending_review' or context.is_admin and row['status']=='failed' or row['status']=='deleting' and row.get('error_json'))),
                  retrievable=row.get('document_status')=='retrievable')
     return value
 
@@ -96,7 +96,7 @@ class KnowledgeService:
     async def document(self,document_id: str,context) -> dict:
         """接收正式文档编号和当前身份，检查批准状态与 ACL；允许合法来源预览，不赋予他人管理权限。"""
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow('''SELECT a.*,d.document_id,d.status AS document_status,d.acl_snapshot AS document_acl,
+            row = await conn.fetchrow('''SELECT a.*,d.document_id,d.status AS document_status,d.acl_snapshot AS document_acl,d.embedding_space,d.index_version,
                 d.approved_fingerprint FROM app_knowledge.documents d JOIN app_knowledge.applications a USING(application_id)
                 WHERE d.document_id=$1''',document_id)
         if row is None or row['document_status'] not in ('pending_index','retrievable') or row['status'] in INACTIVE:
@@ -191,7 +191,7 @@ class KnowledgeService:
                 if action=='withdraw' and row['status']!='pending_review':
                     raise auth_error(409,'WITHDRAW_STATE','仅待审核申请可以撤回，已批准材料请删除')
                 status = 'withdrawn' if action=='withdraw' else 'deleting'
-                await conn.execute('UPDATE app_knowledge.applications SET status=$1,updated_at=now() WHERE application_id=$2',status,application_id)
+                await conn.execute('UPDATE app_knowledge.applications SET status=$1,error_json=NULL,updated_at=now() WHERE application_id=$2',status,application_id)
                 await conn.execute("UPDATE app_knowledge.documents SET status='invalidated' WHERE application_id=$1",application_id)
                 await conn.execute("UPDATE app_knowledge.jobs SET status='cancelled',lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE application_id=$1 AND status IN ('pending','running')",application_id)
                 if action=='delete':
@@ -206,6 +206,8 @@ class KnowledgeService:
                 await self.actor(conn,context)
                 row = dict(await conn.fetchrow('SELECT * FROM app_knowledge.applications WHERE application_id=$1 FOR UPDATE',application_id))
                 kind = 'preview' if row['status']=='pending_review' and row['parse_status']=='failed' else 'publish'
+                if row['status']=='deleting' and row['error_json']:
+                    kind = 'delete'
                 if kind=='publish' and (not context.is_admin or row['status']!='failed'):
                     raise auth_error(409,'RETRY_STATE','当前材料不能重试，请刷新状态')
                 if fingerprint(row)!=row['fingerprint']:
@@ -215,6 +217,11 @@ class KnowledgeService:
                 if active or count>=3:
                     raise auth_error(409,'RETRY_LIMIT','任务正在处理或已达三次尝试，请重新提交文件')
                 document_id = await conn.fetchval('SELECT document_id FROM app_knowledge.documents WHERE application_id=$1',application_id)
+                if kind=='delete':
+                    await conn.execute('UPDATE app_knowledge.applications SET error_json=NULL,updated_at=now() WHERE application_id=$1',application_id)
+                    await self.add_job(conn,row,'delete',trace_id,document_id)
+                    await self.event(conn,trace_id,'knowledge.delete_retry_requested',row,{'actor_user_id':context.user_id})
+                    return
                 await conn.execute('UPDATE app_knowledge.applications SET parse_status=\'pending\',error_json=NULL,status=$1,updated_at=now() WHERE application_id=$2',
                     'pending_review' if kind=='preview' else 'approved_pending_ingest',application_id)
                 if document_id:

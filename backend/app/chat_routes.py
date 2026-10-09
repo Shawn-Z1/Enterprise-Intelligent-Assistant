@@ -91,7 +91,7 @@ async def send_message(conversation_id: ShortId,body: MessageBody,request: Reque
                 raise auth_error(413,error.code,error.message)
             run = dict(await conn.fetchrow('''INSERT INTO app_runtime.runs(run_id,trace_id,conversation_id,user_id,request_key,state_json)
                 VALUES($1,$2,$3,$4,$5,$6) RETURNING *''',run_id,request.state.trace_id,conversation_id,context.user_id,body.request_key,
-                {'request_fingerprint':fingerprint,'user_message_id':message_id}))
+                {'request_fingerprint':fingerprint,'user_message_id':message_id,'auth_session_id':context.session_id}))
             await conn.execute('INSERT INTO app_runtime.messages(message_id,conversation_id,user_id,role,content,run_id) VALUES($1,$2,$3,\'user\',$4,$5)',message_id,conversation_id,context.user_id,body.content,run_id)
             title = ' '.join(body.content.split())[:36] if owned['title']=='新对话' else owned['title']
             await conn.execute('UPDATE app_runtime.conversations SET title=$1,updated_at=now() WHERE conversation_id=$2',title,conversation_id)

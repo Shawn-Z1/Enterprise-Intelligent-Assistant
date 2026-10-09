@@ -155,6 +155,24 @@ async def read_row(request,context,identifier,formal):
     return await (service(request).document(identifier,context) if formal else service(request).application(identifier,context,body=True))
 
 
+@router.get('/sources/{chunk_id}')
+async def source(chunk_id: ShortId,request: Request,context: AuthContext=Depends(current_context)):
+    """接收引用切片编号，逐次验证正式来源的当前状态/ACL/版本及原件，返回定位正文；不授予他人管理权限。"""
+    async with request.app.state.pool.acquire() as conn:
+        chunk = await conn.fetchrow('SELECT * FROM app_knowledge.chunks WHERE chunk_id=$1 AND status=\'active\'',chunk_id)
+    if chunk is None:
+        raise auth_error(404,'SOURCE_UNAVAILABLE','知识来源已失效或不可访问')
+    row = await service(request).document(chunk['document_id'],context)
+    if row['document_status']!='retrievable' or row['embedding_space']!=chunk['embedding_space'] or row['index_version']!=chunk['index_version'] or row['acl_snapshot']!=chunk['acl_snapshot'] or row['original_sha256']!=chunk['source_sha256']:
+        raise auth_error(404,'SOURCE_UNAVAILABLE','知识来源版本已经失效')
+    await request.app.state.knowledge_storage.read_verified(row)
+    await service(request).document(chunk['document_id'],await current_context(request))
+    await security_event(request,'knowledge.source_read',{'chunk_id':chunk_id,'document_id':chunk['document_id']},context)
+    return {'chunk_id':chunk_id,'document_id':chunk['document_id'],'filename':row['filename'],'file_format':row['file_format'],
+            'page':chunk['page_number'],'page_numbers':chunk['page_numbers'],'position':chunk['position'],
+            'heading':chunk['heading'],'heading_path':chunk['heading_path'],'section_paths':chunk['section_paths'],'content':chunk['content']}
+
+
 @router.get('/applications/{identifier}/preview')
 @router.get('/documents/{identifier}/preview')
 async def preview(identifier: ShortId,request: Request,context: AuthContext=Depends(current_context)):

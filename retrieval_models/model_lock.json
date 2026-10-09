@@ -1,0 +1,20 @@
+{
+  "embedding": {
+    "repo": "Xenova/bge-small-zh-v1.5",
+    "revision": "75c43b069aac4d136ba6bc1122f995fedcfd2781",
+    "files": {
+      "onnx/model_quantized.onnx": "15b717c382bcb518ba457b93ea6850ede7f4f1cd8937454aa06972366cd19bcc",
+      "tokenizer.json": "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26"
+    },
+    "dimension": 512,
+    "query_instruction": "为这个句子生成表示以用于检索相关文章："
+  },
+  "reranker": {
+    "repo": "Xenova/bge-reranker-base",
+    "revision": "280bcc27a84e0b898c251e06fddb25171bd9b101",
+    "files": {
+      "onnx/model_quantized.onnx": "dd98f3e67837d23210a6b7550c08cced4f61845b940ac45be3565840a10f3244",
+      "tokenizer.json": "48564c5c7d3fa64d85d95e65414a542385f88b0f128fd8d4163fd7a57f2be05c"
+    }
+  }
+}

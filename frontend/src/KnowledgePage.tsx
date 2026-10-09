@@ -12,7 +12,7 @@ interface Preview { format: string; page_count: number; text: string; pages?: {p
 interface Detail extends Entry { reviews: {review_id: string; decision: string; comment: string; created_at: string}[]; jobs: {job_id: string; job_type: string; status: string; error_json?: {message: string}}[]; }
 interface Options { departments: {department_id: string; name: string}[]; max_files: number; max_file_bytes: number; }
 interface UploadResult { filename: string; success: boolean; error?: {message: string}; application?: Entry; }
-const statuses: Record<string,string> = {pending_review:'待审核',approved_pending_ingest:'批准待处理',parsing:'解析中',pending_index:'待索引',rejected:'已驳回',failed:'处理失败',withdrawn:'已撤回',deleting:'删除中',invalidated:'已失效'};
+const statuses: Record<string,string> = {pending_review:'待审核',approved_pending_ingest:'批准待处理',parsing:'解析中',pending_index:'待索引',vectorizing:'向量化中',indexing:'索引中',retrievable:'可检索',rejected:'已驳回',failed:'处理失败',withdrawn:'已撤回',deleting:'删除中',invalidated:'已失效'};
 
 /** 接收当前可信资料，渲染本人提交、管理员审核和真实原件预览；不提供 ACL 修改或假检索状态。 */
 export function KnowledgePage({user}: {user: UserProfile}) {
@@ -109,7 +109,7 @@ export function KnowledgePage({user}: {user: UserProfile}) {
   async function review(decision: 'approved'|'rejected') {
     if(!selected)return;
     setActionBusy(true);setError('');
-    try {await apiRequest(`/knowledge/applications/${selected.application_id}/review`,'POST',{decision,expected_fingerprint:selected.fingerprint,comment});setNotice(decision==='approved' ? '已批准，等待后台处理；检索索引将在下一阶段接入。' : '已驳回申请');await reload();await select(selected);}
+    try {await apiRequest(`/knowledge/applications/${selected.application_id}/review`,'POST',{decision,expected_fingerprint:selected.fingerprint,comment});setNotice(decision==='approved' ? '已批准，后台正在处理原件并建立检索索引。' : '已驳回申请');await reload();await select(selected);}
     catch(reason){setError(reason instanceof Error ? reason.message : '审核失败');}
     finally{setActionBusy(false);}
   }
@@ -150,7 +150,8 @@ export function KnowledgePage({user}: {user: UserProfile}) {
       <FileText size={22}/><div><h2>{row.filename}</h2><p>{names(row.allowed_department_ids)} · {row.minimum_grade ? `职级 ≥ ${row.minimum_grade}` : '职级不限'} · {beijingTime(row.created_at)}{scope==='all' && row.creator_name ? ` · ${row.creator_name}` : ''}</p><span className={`knowledge-status ${row.status}`}>{statuses[row.status] || row.status}</span>{row.status==='pending_review' && <span className="knowledge-parse-state">{row.parse_status==='completed' ? '预览已就绪' : row.parse_status==='failed' ? '预览解析失败' : '预览处理中'}</span>}{row.error_json && <p className="error-text">{row.error_json.message}</p>}</div><button aria-label={`查看 ${row.filename}`} onClick={()=>void select(row)}>查看</button></article>)}</div>
       {selected && <aside className="knowledge-detail" aria-label="知识材料详情"><div className="knowledge-detail-heading"><h2>{selected.filename}</h2><button aria-label="关闭材料详情" onClick={()=>{setSelected(null);setPreview(null);}}><X size={20}/></button></div>
         <p>{statuses[selected.status]} · {names(selected.allowed_department_ids)} · {selected.minimum_grade ? `职级 ≥ ${selected.minimum_grade}` : '职级不限'}</p>
-        {selected.status==='pending_index' && <p className="knowledge-banner">原件已解析并批准，当前待索引；向量检索将在第六阶段接入。</p>}
+        {selected.status==='pending_index' && <p className="knowledge-banner">原件已解析并批准，后台正在等待建立检索索引。</p>}
+        {selected.status==='retrievable' && <p className="knowledge-banner">索引已就绪，可在对话中查询当前权限范围内的企业知识。</p>}
         {!selected.can_preview && <p className="knowledge-banner">当前权限或材料状态不允许读取正文；管理信息仍可查看。</p>}
         <div className="knowledge-actions"><button disabled={!selected.can_preview || previewBusy} onClick={()=>void openPreview()}><Eye size={17}/>{previewBusy ? '正在读取…' : '预览正文'}</button><button disabled={!selected.can_preview} onClick={()=>void download()}><Download size={17}/>下载原件</button>{selected.can_withdraw && <button disabled={actionBusy} onClick={()=>void maintain('withdraw')}>撤回</button>}{selected.can_retry && <button disabled={actionBusy} onClick={()=>void maintain('retry')}>重试处理</button>}{selected.can_delete && <button disabled={actionBusy} onClick={()=>setDeleteConfirm(true)}>删除</button>}</div>
         {deleteConfirm && <div className="knowledge-delete-confirm"><p>删除后立即停止正文访问，原始审核和审计保留。确认删除此材料？</p><button disabled={actionBusy} onClick={()=>void maintain('delete')}>确认删除</button><button onClick={()=>setDeleteConfirm(false)}>取消</button></div>}

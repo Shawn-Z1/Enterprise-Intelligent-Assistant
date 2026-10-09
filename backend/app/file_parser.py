@@ -1,6 +1,7 @@
 """文件解析子进程入口；接收受限字节，输出结构化正文或安全错误，不接触数据库和凭证。"""
 import base64
 import json
+import re
 import sys
 from io import BytesIO
 from zipfile import ZipFile, BadZipFile
@@ -51,6 +52,27 @@ def decode_text(data: bytes) -> str:
     raise ParseError('TEXT_ENCODING','文本编码不支持，请保存为 UTF-8 后重试')
 
 
+def docx_heading_level(paragraph) -> int | None:
+    """接收真实 Word 段落，先读直接大纲级别再读样式继承，返回1～9级标题；正文级别9不当作标题。"""
+    values=paragraph._p.xpath('./w:pPr/w:outlineLvl/@w:val')
+    if values:
+        return int(values[0])+1 if values[0].isdigit() and 0<=int(values[0])<=8 else None
+    style=paragraph.style
+    visited=set()
+    while style is not None and style.style_id not in visited:
+        visited.add(style.style_id)
+        values=style.element.xpath('./w:pPr/w:outlineLvl/@w:val')
+        if values:
+            return int(values[0])+1 if values[0].isdigit() and 0<=int(values[0])<=8 else None
+        match=re.fullmatch(r'(?:Heading|标题)\s*([1-9])',style.name or '',re.I)
+        if match:
+            return int(match[1])
+        if (style.name or '').lower() in ('title','标题'):
+            return 1
+        style=style.base_style
+    return None
+
+
 def parse(data: bytes,kind: str) -> dict:
     """接收真实原件与服务端格式，返回完整受限正文、段落/表格或 PDF 页；不生成任何正式知识切片。"""
     if kind in ('txt','md'):
@@ -64,7 +86,8 @@ def parse(data: bytes,kind: str) -> dict:
         for item in Document(BytesIO(data)).iter_inner_content():
             if isinstance(item,Paragraph):
                 if item.text:
-                    blocks.append({'type':'paragraph','text':item.text,'style':item.style.name if item.style else ''})
+                    blocks.append({'type':'paragraph','text':item.text,'style':item.style.name if item.style else '',
+                                   'heading_level':docx_heading_level(item)})
                     texts.append(item.text)
             else:
                 rows = [[cell.text for cell in row.cells] for row in item.rows]

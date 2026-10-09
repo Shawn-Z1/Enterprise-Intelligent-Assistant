@@ -146,7 +146,7 @@ class ModelGateway:
         if self.owns_client:
             await self.client.aclose()
 
-    async def complete(self, factory: Callable[[ModelSlot],list[dict]], audit: AuditCallback, emit: EventCallback) -> ModelResult:
+    async def complete(self, factory: Callable[[ModelSlot],list[dict]], audit: AuditCallback, emit: EventCallback, tools: list[dict] | None=None, guard=None) -> ModelResult:
         """接收逐槽位上下文工厂和审计/事件回调，流式调用主备；成功返回合并回复，完全失败抛安全错误。"""
         last_error = GatewayError("MODEL_UNAVAILABLE","主模型与备用模型均未能完成回答")
         for slot in self.slots:
@@ -175,7 +175,9 @@ class ModelGateway:
                     await emit("assistant.reset",{"reason":"new_attempt"})
                     await emit("model.started",{"slot":slot.role,"model":slot.model,"attempt":number,"message":"正在生成回答"})
                     try:
-                        result = await self._attempt(slot,messages,number,attempt_id,audit,emit)
+                        if guard:
+                            await guard()
+                        result = await self._attempt(slot,messages,number,attempt_id,audit,emit,tools)
                         circuit.failures,circuit.opened_until = 0,0
                         return result
                     except GatewayError as error:
@@ -194,9 +196,12 @@ class ModelGateway:
                 circuit.probing = False
         raise last_error
 
-    async def _attempt(self, slot: ModelSlot, messages: list[dict], number: int, attempt_id: str, audit: AuditCallback, emit: EventCallback) -> ModelResult:
+    async def _attempt(self, slot: ModelSlot, messages: list[dict], number: int, attempt_id: str, audit: AuditCallback, emit: EventCallback, tools: list[dict] | None=None) -> ModelResult:
         """接收槽位、上下文和尝试标识，执行一次实际 HTTP 流；完整审计后返回标准结果，途中失败保留原始包。"""
         body = slot.request(messages,self.settings.model_output_tokens)
+        if tools:
+            body['tools'] = tools
+            body['tool_choice'] = 'auto'
         metadata = {"attempt_id":attempt_id,"slot":slot.role,"provider":slot.provider,"model":slot.model,"attempt":number}
         await audit("model.request",{**metadata,"request":body},None)
         chunks, content, reasoning, tools = [],"","",{}

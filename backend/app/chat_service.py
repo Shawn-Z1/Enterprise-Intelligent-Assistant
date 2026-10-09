@@ -91,12 +91,13 @@ class RunWriter:
 
 
 class ChatProcessor:
-    """后台普通文本执行器；任务归属、状态、原消息和事件持久化，模型细节统一交给网关。"""
+    """后台会话执行器，生产使用真实 LangGraph 工具循环；任务、原消息和事件持久化，模型统一走网关。"""
 
-    def __init__(self, pool, settings, gateway: ModelGateway, audit: AuditRecorder, worker_id: str | None = None):
+    def __init__(self, pool, settings, gateway: ModelGateway, audit: AuditRecorder, worker_id: str | None = None, rag=None):
         """接收连接池、运行配置、网关和审计，保存 worker 标识；允许隔离测试复用真实执行代码。"""
         self.pool,self.settings,self.gateway,self.audit = pool,settings,gateway,audit
         self.worker_id = worker_id or new_id()
+        self.rag = rag
 
     async def claim(self) -> dict | None:
         """无参数，在短事务中通过 SKIP LOCKED 领取一个待执行任务及租约，返回可信身份任务或空。"""
@@ -143,7 +144,11 @@ class ChatProcessor:
                 rows = await conn.fetch('SELECT m.* FROM app_runtime.messages m WHERE conversation_id=$1 AND user_id=$2 ORDER BY message_order',run['conversation_id'],run['user_id'])
             assembler = ContextAssembler([dict(row) for row in rows],run['run_id'],self.settings.model_output_tokens)
             async with asyncio.timeout(self.settings.run_timeout_seconds):
-                result = await self.gateway.complete(assembler.assemble,writer.record_model,writer.emit)
+                if self.rag:
+                    from app.rag_agent import RagAgent
+                    result = await RagAgent(self,self.rag,writer,[dict(row) for row in rows]).run()
+                else:
+                    result = await self.gateway.complete(assembler.assemble,writer.record_model,writer.emit)
                 await writer.finish('completed',result=result)
         except asyncio.CancelledError:
             async with self.pool.acquire() as conn:
