@@ -11,6 +11,7 @@ import httpx
 from app.audit import Usage
 from app.config import Settings
 from app.ids import new_id
+from app.token_counting import count_value, count_request
 
 AuditCallback = Callable[[str, dict, Usage | None], Awaitable[None]]
 EventCallback = Callable[[str, dict], Awaitable[None]]
@@ -100,21 +101,22 @@ class Circuit:
     probing: bool = False
 
 
-def estimate_tokens(value) -> int:
-    """接收消息或文本，以 UTF-8 字节上界估算 token；返回保守数值，不表示厂商计费用量。"""
-    encoded = value if isinstance(value,str) else json.dumps(value,ensure_ascii=False,separators=(",",":"))
-    return len(encoded.encode("utf-8")) + 64
+def estimate_tokens(value, model: str='') -> int:
+    """接收消息/文本与型号，返回模型参考tokenizer预算；未知型号用字节上界，不表示供应商计费用量。"""
+    return count_value(value,model).count
 
 
-def usage_from_response(raw: dict | None, messages: list[dict], content: str, model: str) -> Usage:
+def usage_from_response(raw: dict | None, messages: list[dict], content: str, model: str, tools=None, response_message=None) -> Usage:
     """接收最后一份实际用量、输入和输出，返回 reported 或明确方法的 estimated，不累加流式用量包。"""
     raw = raw or {}
     values = {name:raw.get(key) for name,key in (("input_tokens","prompt_tokens"),("output_tokens","completion_tokens"),("total_tokens","total_tokens"))}
     if any(value is not None for value in values.values()) and all(value is None or (type(value) is int and value>=0) for value in values.values()):
         return Usage(source="reported",**values,model=model)
-    input_tokens,output_tokens = estimate_tokens(messages),estimate_tokens(content)
+    counted=count_request(messages,tools,model)
+    output_tokens=estimate_tokens(response_message or content,model)
+    input_tokens=counted.count
     return Usage(source="estimated",input_tokens=input_tokens,output_tokens=output_tokens,total_tokens=input_tokens+output_tokens,
-                 method="utf8_bytes_upper_bound_v1",model=model)
+                 method=counted.method if counted.tokenizer=='unknown_model' else counted.method+':'+counted.tokenizer,model=model)
 
 
 def classify_status(status: int, raw) -> GatewayError:
@@ -136,10 +138,12 @@ class ModelGateway:
         self.settings = settings
         self.slots = [ModelSlot("primary",settings.primary_base_url,settings.primary_api_key.get_secret_value(),settings.primary_model,settings.primary_context_tokens),
                       ModelSlot("fallback",settings.fallback_base_url,settings.fallback_api_key.get_secret_value(),settings.fallback_model,settings.fallback_context_tokens)]
+        # 审核使用独立槽位和熔断状态；即使URL/密钥相同也不与备用槽位耦合。
+        self.review_slot = ModelSlot("review",settings.review_base_url,settings.review_api_key.get_secret_value(),settings.review_model,settings.review_context_tokens)
         self.owns_client = client is None
         self.client = client or httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(retries=0),trust_env=False,
             timeout=httpx.Timeout(settings.model_read_timeout_seconds,connect=10),follow_redirects=False)
-        self.circuits = {slot.role:Circuit() for slot in self.slots}
+        self.circuits = {slot.role:Circuit() for slot in [*self.slots,self.review_slot]}
 
     async def close(self):
         """无参数关闭网关自建连接池；外部测试客户端由调用者管理，无返回值。"""
@@ -177,7 +181,10 @@ class ModelGateway:
                     try:
                         if guard:
                             await guard()
-                        result = await self._attempt(slot,messages,number,attempt_id,audit,emit,tools)
+                        # 每次实际请求重建工具目录与消息，重试/备用不会沿用撤权前的schema。
+                        actual_tools = await tools() if callable(tools) else tools
+                        messages = factory(slot)
+                        result = await self._attempt(slot,messages,number,attempt_id,audit,emit,actual_tools)
                         circuit.failures,circuit.opened_until = 0,0
                         return result
                     except GatewayError as error:
@@ -196,6 +203,34 @@ class ModelGateway:
                 circuit.probing = False
         raise last_error
 
+    async def review(self, factory, audit: AuditCallback, emit: EventCallback, guard=None) -> ModelResult:
+        """接收审核上下文工厂、审计/事件回调及权限守卫，仅调用独立审核槽位；瞬时故障最多两次，不降级自审。"""
+        slot, circuit = self.review_slot, self.circuits['review']
+        slot.endpoint()
+        if circuit.opened_until>monotonic() or circuit.probing:
+            raise GatewayError('REVIEW_UNAVAILABLE','答案审核模型暂时不可用')
+        half_open = circuit.opened_until>0
+        circuit.probing = half_open
+        try:
+            for number in range(1,3):
+                if guard:
+                    await guard()
+                messages = factory(slot)
+                try:
+                    result = await self._attempt(slot,messages,number,new_id(),audit,emit)
+                    circuit.failures,circuit.opened_until = 0,0
+                    return result
+                except GatewayError as error:
+                    circuit.failures += 1
+                    if circuit.failures>=self.settings.model_circuit_failures:
+                        circuit.opened_until = monotonic()+self.settings.model_circuit_seconds
+                    if not error.retryable or half_open or number==2:
+                        raise
+                    await audit('review.retry',{'attempt':number,'reason':error.code},None)
+                    await asyncio.sleep(self.settings.model_retry_backoff_seconds)
+        finally:
+            circuit.probing = False
+
     async def _attempt(self, slot: ModelSlot, messages: list[dict], number: int, attempt_id: str, audit: AuditCallback, emit: EventCallback, tools: list[dict] | None=None) -> ModelResult:
         """接收槽位、上下文和尝试标识，执行一次实际 HTTP 流；完整审计后返回标准结果，途中失败保留原始包。"""
         body = slot.request(messages,self.settings.model_output_tokens)
@@ -203,7 +238,14 @@ class ModelGateway:
             body['tools'] = tools
             body['tool_choice'] = 'auto'
         metadata = {"attempt_id":attempt_id,"slot":slot.role,"provider":slot.provider,"model":slot.model,"attempt":number}
-        await audit("model.request",{**metadata,"request":body},None)
+        # 网关统一复核实际消息和工具预算，独立公开关键词等调用也不会绕过窗口检查。
+        counted=count_request(body['messages'],body.get('tools'),slot.model)
+        budget={'input_tokens':counted.count,'output_reserved':self.settings.model_output_tokens,'window':slot.window,'safe_limit':int(slot.window*0.8),
+                'method':counted.method,'tokenizer':counted.tokenizer,'source':'estimated'}
+        if counted.count+self.settings.model_output_tokens>budget['safe_limit']:
+            await audit('model.budget_rejected',{**metadata,'budget':budget},None)
+            raise GatewayError('CONTEXT_TOO_LARGE','本次输入与预留输出超过模型安全窗口，请缩小任务')
+        await audit("model.request",{**metadata,"request":body,'budget':budget},None)
         chunks, content, reasoning, tools = [],"","",{}
         raw_usage, finish, actual_model, completed = None,None,slot.model,False
         started = monotonic()
@@ -259,7 +301,7 @@ class ModelGateway:
                 merged["reasoning_content"] = reasoning
             if tools:
                 merged["tool_calls"] = [tools[key] for key in sorted(tools)]
-            usage = usage_from_response(raw_usage,body["messages"],content,actual_model)
+            usage = usage_from_response(raw_usage,body["messages"],content,actual_model,body.get('tools'),merged)
             await audit("model.response",{**metadata,"actual_model":actual_model,"chunks":chunks,"merged":merged,
                 "finish_reason":finish,"usage":raw_usage,"duration_ms":(monotonic()-started)*1000},usage)
             return ModelResult(content,merged,usage,actual_model,slot.provider,slot.role,attempt_id,finish)

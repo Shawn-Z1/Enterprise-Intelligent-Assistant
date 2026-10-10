@@ -1,0 +1,15 @@
+{
+  "deepseek_v41": {
+    "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-recipe/main/static/tokenizers/v41/tokenizer.json",
+    "filename": "deepseek-v41.json",
+    "sha256": "81f64d1248a68ce3663e07ab3ee48b851e5df0e32d27cb98e4c9a268151e8d99",
+    "upstream": "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+    "comparison_revision": "6821d6ad3681a4b137b066b76094fa82ebd0a380",
+    "note": "DeepSeek官方V4.1参考分词器；图像特殊token有官方配方调整，本应用仅使用文本，不宣称等于在线API完整聊天模板。"
+  },
+  "qwen": {
+    "sdk": "dashscope",
+    "version": "1.27.7",
+    "note": "官方SDK本地Qwen系列参考分词器；qwen3.8-flash闭源服务模板可能不同，实际usage仍是计费用量真源。"
+  }
+}

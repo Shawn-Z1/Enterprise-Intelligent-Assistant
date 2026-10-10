@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     fallback_base_url: str = ""
     fallback_api_key: SecretStr = SecretStr("")
     fallback_model: str = "qwen-plus"
+    # 审核职责独立配置，不随备用模型切换，也不退回主模型自审。
+    review_base_url: str = ""
+    review_api_key: SecretStr = SecretStr("")
+    review_model: str = "qwen-plus"
+    review_context_tokens: int = Field(default=0,ge=0,le=2_000_000)
     primary_context_tokens: int = Field(default=0,ge=0,le=2_000_000)
     fallback_context_tokens: int = Field(default=0,ge=0,le=2_000_000)
     model_output_tokens: int = Field(default=2048,ge=64,le=32768)
@@ -60,6 +65,17 @@ class Settings(BaseSettings):
     rag_final_limit: int = Field(default=5, ge=1, le=10)
     rag_min_score: float = Field(default=0.3, ge=0, le=1)
     rag_rrf_k: int = Field(default=60, ge=1, le=200)
+    # 搜索服务独立于主备文本模型，空密钥明确返回未配置，不伪造联网结果。
+    web_search_provider: str = 'aliyun_iqs'
+    web_search_base_url: str = 'https://cloud-iqs.aliyuncs.com'
+    web_search_engine_type: str = 'CNLiteBasic'
+    web_search_api_key: SecretStr = SecretStr('')
+    web_search_timeout_seconds: float = Field(default=12, ge=1, le=30)
+    web_search_max_results: int = Field(default=5, ge=1, le=5)
+    web_search_max_pages: int = Field(default=3, ge=0, le=3)
+    web_search_response_bytes: int = Field(default=2097152, ge=1024, le=4194304)
+    web_search_text_chars: int = Field(default=2500, ge=300, le=5000)
+    web_search_per_minute: int = Field(default=10, ge=1, le=60)
 
 
 @lru_cache

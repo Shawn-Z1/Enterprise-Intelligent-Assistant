@@ -1,6 +1,9 @@
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
+dashscope==1.27.7
+tokenizers==0.23.3
+tiktoken==0.14.0
 argon2-cffi==25.1.0
 argon2-cffi-bindings==26.1.0
 asyncpg==0.31.0

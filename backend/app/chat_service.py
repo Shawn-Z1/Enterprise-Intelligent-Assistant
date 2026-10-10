@@ -46,6 +46,13 @@ class RunWriter:
                     raise RunCancelled()
                 await self.append_event(conn,kind,data)
 
+    async def check_active(self):
+        """无参数只核验本任务仍运行且用户未取消/禁用；缓冲模型输出时不追加无意义的逐token事件。"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow('SELECT r.status,r.cancel_requested,u.status AS user_status FROM app_runtime.runs r JOIN app_system.users u USING(user_id) WHERE r.run_id=$1',self.run['run_id'])
+        if row is None or row['cancel_requested'] or row['user_status']!='active' or row['status'] in TERMINAL:
+            raise RunCancelled()
+
     async def record_model(self, kind: str, data: dict, usage: Usage | None):
         """接收模型实际请求、原始包或结果，在同一事务中保存尝试与永久审计；失败则阻止后续模型调用。"""
         cleaned = redact_secrets(data,self.audit.secrets)
@@ -93,11 +100,12 @@ class RunWriter:
 class ChatProcessor:
     """后台会话执行器，生产使用真实 LangGraph 工具循环；任务、原消息和事件持久化，模型统一走网关。"""
 
-    def __init__(self, pool, settings, gateway: ModelGateway, audit: AuditRecorder, worker_id: str | None = None, rag=None):
+    def __init__(self, pool, settings, gateway: ModelGateway, audit: AuditRecorder, worker_id: str | None = None, rag=None, web=None):
         """接收连接池、运行配置、网关和审计，保存 worker 标识；允许隔离测试复用真实执行代码。"""
         self.pool,self.settings,self.gateway,self.audit = pool,settings,gateway,audit
         self.worker_id = worker_id or new_id()
         self.rag = rag
+        self.web = web
 
     async def claim(self) -> dict | None:
         """无参数，在短事务中通过 SKIP LOCKED 领取一个待执行任务及租约，返回可信身份任务或空。"""

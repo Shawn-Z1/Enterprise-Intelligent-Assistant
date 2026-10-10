@@ -17,6 +17,7 @@ from app.knowledge_storage import KnowledgeStorage
 from app.knowledge_worker import KnowledgeProcessor
 from app.rag_index import RagIndex
 from app.rag_service import RagService
+from app.web_search import WebSearchService
 from app.knowledge_indexer import KnowledgeIndexer
 from app.rag_contract import INDEX_VERSION
 from app.timezones import beijing_now
@@ -29,7 +30,7 @@ async def heartbeat(settings, pool, audit, stopping: asyncio.Event):
     """接收配置、连接池、审计和停止事件，持续保存北京时间心跳及真实依赖状态；停止后返回。"""
     events,trace_id = InfrastructureEvents(),new_id()
     path,previous = Path(settings.worker_state_path),None
-    await audit.append(trace_id,'service.started',{'service':'worker','milestone':'M06'})
+    await audit.append(trace_id,'service.started',{'service':'worker','milestone':'M06A'})
     while not stopping.is_set():
         results = await check_dependencies(settings)
         state = {'timestamp':beijing_now().isoformat(),'pid':os.getpid(),'ready':all(item.status=='ready' for item in results.values()),
@@ -52,13 +53,14 @@ async def run():
     settings = get_settings()
     pool = await create_app_pool(settings)
     secrets = tuple(value.get_secret_value() for value in (settings.postgres_password,settings.business_db_password,
-        settings.app_minio_secret_key,settings.primary_api_key,settings.fallback_api_key))
+        settings.app_minio_secret_key,settings.primary_api_key,settings.fallback_api_key,settings.review_api_key,settings.web_search_api_key))
     audit = AuditRecorder(pool,'worker',secrets)
     gateway = ModelGateway(settings)
     index = RagIndex(settings)
     storage = KnowledgeStorage(settings)
     rag = RagService(pool,settings,index,storage,audit)
-    processor = ChatProcessor(pool,settings,gateway,audit,rag=rag)
+    web = WebSearchService(pool,settings,audit)
+    processor = ChatProcessor(pool,settings,gateway,audit,rag=rag,web=web)
     knowledge = KnowledgeProcessor(pool,settings,storage,audit,KnowledgeIndexer(pool,settings,index,audit))
     await queue_existing_approved(pool,knowledge)
     stopping = asyncio.Event()
@@ -101,6 +103,7 @@ async def run():
         await asyncio.gather(*tasks,return_exceptions=True)
         health_task.cancel()
         await asyncio.gather(health_task,return_exceptions=True)
+        await web.close()
         await gateway.close()
         await index.close()
         await pool.close()

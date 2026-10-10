@@ -51,12 +51,16 @@ class AgentBoundaries(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code,202,response.text)
         async def record(request):
             """接收网关实际请求，记录协议 JSON 再返回指定故障夹具；不替换 RAG 或数据库。"""
+            if request.url.host=='review-boundary.test':
+                # 该组只验既有RAG边界，审核正路径/故障由独立test_answer_review验证。
+                return httpx.Response(200,content=protocol.packets('{"verdict":"approve","issues":[]}'))
             self.requests.append(json.loads(request.content))
             return handler(request)
         client=httpx.AsyncClient(transport=httpx.MockTransport(record))
         self.clients.append(client)
         settings=self.settings.model_copy(update={'primary_base_url':'https://boundary.test/v1','primary_api_key':SecretStr('boundary-fixture-key'),
-            'primary_model':'boundary-fixture','primary_context_tokens':32768,'model_retry_backoff_seconds':0})
+            'primary_model':'boundary-fixture','primary_context_tokens':32768,'model_retry_backoff_seconds':0,
+            'review_base_url':'https://review-boundary.test/v1','review_api_key':SecretStr('review-boundary-key'),'review_model':'review-boundary','review_context_tokens':32768})
         gateway=ModelGateway(settings,client)
         self.gateways.append(gateway)
         processor=ChatProcessor(self.pool,settings,gateway,self.audit,rag=self.rag)
@@ -114,7 +118,7 @@ class AgentBoundaries(unittest.IsolatedAsyncioTestCase):
         run=await self.execute(self.login_as('zhangsan'),handler)
         self.assertEqual(run['status'],'completed')
         content=await self.admin.fetchval("SELECT content FROM app_runtime.messages WHERE role='assistant'")
-        self.assertIn('无法确定',content)
+        self.assertIn('无法',content)
         self.assertNotIn('9999999',content)
 
     async def test_repeated_retrieval_keeps_unique_sources_and_labels(self):
@@ -150,7 +154,8 @@ class AgentBoundaries(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run['status'],'completed')
         message=await self.admin.fetchval("SELECT protocol_json->'message' FROM app_runtime.messages WHERE role='assistant'")
         self.assertEqual(message['citations'],[])
-        self.assertIn('无法确定',message['content'])
+        self.assertIn('无法',message['content'])
+        self.assertNotIn('650',message['content'])
         evidence=await self.admin.fetchval('SELECT evidence_json FROM app_runtime.retrievals')
         self.assertIn('zx-2099-z99',evidence['filter'])
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { ArrowUp, Check, MessageSquare, Pencil, Square, X } from 'lucide-react';
-import { apiRequest, beijingTime, requestId, citationPages, type ChatEvent, type ChatMessage, type ChatRun, type Conversation, type ConversationDetail, type Citation } from './api';
+import { apiRequest, beijingTime, requestId, citationPages, citationTitle, type ChatEvent, type ChatMessage, type ChatRun, type Conversation, type ConversationDetail, type Citation } from './api';
 import { SourcePanel } from './SourcePanel';
 
 interface Props { conversationId: string | null; revision: number; userName: string; select: (id: string) => void; changed: () => Promise<void>; }
@@ -146,7 +146,7 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
       {messages.map(message => <article className={`chat-message ${message.role}`} key={message.message_id}>
         <div className="message-meta"><strong>{message.role==='user' ? '你' : '知行'}</strong><time dateTime={message.created_at}>{beijingTime(message.created_at)}</time></div>
         <div className="message-content">{message.content}</div>
-        {!!message.citations?.length && <div className="message-sources" aria-label="回答引用">{message.citations.map(source=><button key={source.label} onClick={()=>setCitation(source)} aria-label={`来源 ${source.label} ${source.filename}`}>[{source.label}] {source.filename}{citationPages(source) ? ` · ${citationPages(source)}` : ''}</button>)}</div>}
+        {!!message.citations?.length && <div className="message-sources" aria-label="回答引用">{message.citations.map(source=><button key={source.label} onClick={()=>setCitation(source)} aria-label={`来源 ${source.label} ${citationTitle(source)}`}>[{source.label}] {citationTitle(source)}{citationPages(source) ? ` · ${citationPages(source)}` : ''}</button>)}</div>}
         {message.finish_reason==='length' && <p className="message-limit-note">达到单次输出上限，可继续提问。</p>}
         {message.role==='user' && message.error && <p className="run-error">{message.error.message}</p>}
       </article>)}

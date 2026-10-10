@@ -40,7 +40,9 @@ export interface ChatMessage {
   usage?: {source: 'reported' | 'estimated' | 'unavailable'; total_tokens: number | null} | null; finish_reason?: string | null;
   citations?: Citation[];
 }
-export interface Citation { label: string; chunk_id: string; document_id: string; filename: string; page: number | null; heading: string | null; position: number;
+export interface Citation { type?: 'knowledge' | 'web'; label: string; chunk_id?: string; document_id?: string; filename?: string; page?: number | null; heading?: string | null; position?: number;
+  source_id?: string; title?: string; url?: string; website?: string; published_at?: string | null; fetched_at?: string;
+  content_kind?: 'search_snippet' | 'provider_excerpt' | 'page_text'; page_read?: boolean; truncated?: boolean;
   page_numbers?: number[] | null; heading_path?: {level:number;title:string}[] | null; }
 
 /** 接收引用真实页集合，返回单页、连续页范围或非连续页列表，兼容旧引用而不虚报跨页位置。 */
@@ -49,6 +51,11 @@ export function citationPages(source: Citation): string {
   if(!pages.length)return '';
   const contiguous=pages.every((page,index)=>index===0 || page===pages[index-1]+1);
   return `第 ${pages.length>1 && contiguous ? `${pages[0]}–${pages[pages.length-1]}` : pages.join('、')} 页`;
+}
+
+/** 接收内部或公开引用，返回可读来源标签；不将网页标题冒充内部文件名。 */
+export function citationTitle(source: Citation): string {
+  return source.type==='web' ? `公开 · ${source.title || source.website || '网页'}` : `内部 · ${source.filename || '知识文档'}`;
 }
 export interface ConversationDetail { conversation_id: string; title: string; messages: ChatMessage[]; active_run: ChatRun | null; last_run: ChatRun | null; }
 export interface ChatEvent { sequence: number; run_id: string; trace_id: string; timestamp: string; type: string; data: {text?: string; message?: string; model?: string; slot?: string; attempt?: number; next_attempt?: number; status?: ChatRun['status']; error?: ChatRun['error']}; }

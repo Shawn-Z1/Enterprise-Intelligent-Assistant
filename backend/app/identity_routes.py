@@ -196,7 +196,8 @@ async def conversation(conversation_id: ShortId,request: Request,context: AuthCo
             for message in messages:
                 value = dict(message)
                 # 原引用档案保留，但历史接口不重放受限正文；点击来源时重新请求当前鉴权接口。
-                value['citations'] = [{key:item.get(key) for key in ('label','chunk_id','document_id','filename','page','page_numbers','heading','heading_path','position')} for item in (value['citations'] or [])]
+                value['citations'] = [{key:item.get(key) for key in ('type','label','chunk_id','document_id','filename','page','page_numbers','heading','heading_path','position',
+                    'source_id','title','url','website','published_at','fetched_at','content_kind','page_read','truncated')} for item in (value['citations'] or [])]
                 public_messages.append(value)
             return {**dict(owned),"messages":public_messages,"active_run":dict(active) if active else None,"last_run":dict(last_run) if last_run else None}
     await security_event(request,"resources.access_rejected",{"resource":"conversation","resource_id":str(conversation_id)},context)

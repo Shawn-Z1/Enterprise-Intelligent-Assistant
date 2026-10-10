@@ -4,19 +4,18 @@ import json
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.errors import NodeCancelledError
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException
 
 from app.context import ContextAssembler
+from app.answer_review import evaluate, limited_answer
 from app.ids import new_id
 from app.model_gateway import GatewayError, estimate_tokens
 from app.rag_service import live_context
 from app.rag_index import identifiers
-
-# 工具只暴露问题，用户/部门/职级和集合名全部由可信后台上下文决定。
-TOOLS = [{'type':'function', 'function':{'name':'search_knowledge', 'description':'查询本企业当前授权的知识文档。内部制度、业务规则或编号的事实必须使用此工具取得证据；普通知识问题可直接回答。',
-         'parameters':{'type':'object','properties':{'query':{'type':'string','description':'独立、具体的中文检索问题，可包含精确制度编号或日期'}},'required':['query'],'additionalProperties':False}}}]
-
+from app.tool_registry import available_tools, model_observation
+from app.web_search import SearchError, outbound_query
 
 class Arguments(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -27,6 +26,9 @@ class State(TypedDict):
     messages: list[dict]
     turns: int
     result: object
+    revisions: int
+    reviews: list[dict]
+    review_status: str
 
 
 class RagAgent:
@@ -36,56 +38,85 @@ class RagAgent:
         self.processor, self.rag, self.writer = processor, rag, writer
         self.assembler = ContextAssembler(rows, writer.run['run_id'], processor.settings.model_output_tokens)
         self.citations, self.observations, self.protocol = [], [], []
+        self.current_tools = []
+        # 仅当前用户问题可供公开查询投影，内部历史及工具正文不参与外发词生成。
+        self.current_input = next((row['content'] for row in reversed(rows) if row['role']=='user' and row.get('run_id')==writer.run['run_id']),'')
+        self.web = getattr(processor,'web',None)
+        # 同一run的公开任务不重复外发，复用本轮已保存快照；不跨会话/用户缓存。
+        self.web_output = None
         # 原始用户问题的精确编号/日期属于查询约束，模型改写检索问题不能丢弃这些约束。
-        current=next((row['content'] for row in reversed(rows) if row['role']=='user' and row.get('run_id')==writer.run['run_id']),'')
+        current=self.current_input
         self.required_identifiers=identifiers(current)
         self.current_state = None
         builder = StateGraph(State)
         builder.add_node('model', self.model)
         builder.add_node('tools', self.tools)
+        builder.add_node('review', self.review)
+        builder.add_node('publish', self.publish)
         builder.add_edge(START, 'model')
-        builder.add_conditional_edges('model', self.route, ['tools', END])
+        builder.add_conditional_edges('model', self.route, ['tools', 'review'])
         builder.add_edge('tools', 'model')
+        builder.add_conditional_edges('review', self.review_route, ['model','publish'])
+        builder.add_edge('publish', END)
         self.graph = builder.compile()
 
     async def context(self):
         """无参数从运行创建时保存的登录会话重读当前身份；模型无法指定或覆盖此身份。"""
-        return await live_context(self.processor.pool, self.writer.run['user_id'], self.writer.run['state_json']['auth_session_id'])
+        try:
+            return await live_context(self.processor.pool, self.writer.run['user_id'], self.writer.run['state_json']['auth_session_id'])
+        except HTTPException as error:
+            detail=error.detail if isinstance(error.detail,dict) else {'code':'UNAUTHENTICATED','message':'登录已失效，请重新登录'}
+            raise GatewayError(detail['code'],detail['message']) from None
 
     def factory(self, slot):
         """接收主或备用模型槽位，组装完整工具调用/观察配对并计入工具 schema 预算，超限明确拒绝。"""
         messages = self.assembler.assemble(slot)+self.current_state['messages']
-        if estimate_tokens(slot.request(messages,self.processor.settings.model_output_tokens)['messages'])+estimate_tokens(TOOLS)+self.processor.settings.model_output_tokens>int(slot.window*0.8):
+        if estimate_tokens(slot.request(messages,self.processor.settings.model_output_tokens)['messages'],slot.model)+estimate_tokens(self.current_tools,slot.model)+self.processor.settings.model_output_tokens>int(slot.window*0.8):
             raise GatewayError('CONTEXT_TOO_LARGE', '检索结果与历史超过当前模型安全窗口，请新建会话或缩短问题')
         return messages
 
     async def guard(self):
         """无参数在每次实际模型发送前重新核验已取得证据；撤权、删除或旧索引不能继续进入模型。"""
+        context = await self.context()
         if not self.citations:
             return
-        context, chunks = await self.rag.validate(await self.context(), [row['chunk_id'] for row in self.citations])
-        if {row['chunk_id'] for row in chunks}!={row['chunk_id'] for row in self.citations}:
+        internal = [row for row in self.citations if row.get('type','knowledge')=='knowledge']
+        if not internal:
+            return
+        context, chunks = await self.rag.validate(context, [row['chunk_id'] for row in internal])
+        if {row['chunk_id'] for row in chunks}!={row['chunk_id'] for row in internal}:
             raise GatewayError('RAG_EVIDENCE_CHANGED', '知识来源或权限已变化，本次回答已停止，请重新提问')
 
+    async def tool_schemas(self):
+        """无参数重读PG身份，过滤模型工具目录并整轮移除旧内部证据派生历史；返回可调用schema。"""
+        context = await self.context()
+        self.current_tools = available_tools(context,self.web is not None)
+        # 历史内部证据轮次整体不复送；原历史/审计保留，内部事实需重新检索。
+        excluded = {row.get('run_id') for row in self.assembler.rows if row['role']=='assistant' and
+                    any(value.get('type','knowledge')=='knowledge' for value in (row.get('protocol_json') or {}).get('message',{}).get('citations',[]))}
+        self.assembler.rows = [row for row in self.assembler.rows if row.get('run_id')==self.writer.run['run_id'] or row.get('run_id') not in excluded]
+        return self.current_tools
+
     async def emit(self, kind, data):
-        """接收网关事件，保留运行状态但缓冲回答正文，确保工具决定和最终权限复核前不展示过期证据。"""
-        if kind in ('assistant.delta','assistant.reset') and self.observations:
+        """接收主模型网关事件，所有草稿先缓冲，状态继续展示；审核通过或受限结束后才发布正文。"""
+        if kind in ('assistant.delta','assistant.reset'):
+            await self.writer.check_active()
             return
         await self.writer.emit(kind, data)
 
     async def model(self, state: State) -> dict:
         """接收图状态，实际调用文本模型自主选择回答或 tool_calls，返回标准结果及递增轮次。"""
-        if state['turns']>=4:
+        if state['turns']>=11:
             raise GatewayError('AGENT_STEP_LIMIT', '本次检索步骤超过限制，请缩短问题再试')
         self.current_state = state
         await self.guard()
-        result = await self.processor.gateway.complete(self.factory, self.writer.record_model, self.emit, TOOLS, self.guard)
+        result = await self.processor.gateway.complete(self.factory, self.writer.record_model, self.emit, self.tool_schemas, self.guard)
         result.message['_provider'] = result.provider
         return {'messages':state['messages']+[result.message], 'result':result, 'turns':state['turns']+1}
 
     def route(self, state: State):
-        """接收模型真实结果，仅按实际 tool_calls 路由到工具节点；没有调用即结束，不用关键词假装自主决策。"""
-        return 'tools' if state['result'].message.get('tool_calls') else END
+        """接收模型真实结果，有调用则执行工具，无调用进入独立审核，普通直接回答也不能跳过审核。"""
+        return 'tools' if state['result'].message.get('tool_calls') else 'review'
 
     async def tools(self, state: State) -> dict:
         """接收真实模型工具调用，严格校验工具和参数，记录完整观察，返回配对 tool 消息供模型继续回答。"""
@@ -93,8 +124,11 @@ class RagAgent:
         if not 1<=len(calls)<=3:
             raise GatewayError('TOOL_CALL_LIMIT', '本次工具调用数量超过限制')
         messages = list(state['messages'])
+        if len(self.observations)+len(calls)>10:
+            raise GatewayError('TOOL_CALL_LIMIT','整轮工具调用达到10次上限，请缩小任务')
         for call in calls:
-            if not call.get('id') or len(call['id'])>200 or call.get('type')!='function' or call.get('function',{}).get('name')!='search_knowledge':
+            name = call.get('function',{}).get('name')
+            if not call.get('id') or len(call['id'])>200 or call.get('type')!='function' or name not in ('search_knowledge','search_web'):
                 raise GatewayError('TOOL_NOT_ALLOWED', '模型请求了未开放的工具，已停止执行')
             try:
                 args = Arguments.model_validate_json(call['function']['arguments'])
@@ -104,17 +138,34 @@ class RagAgent:
             async with self.processor.pool.acquire() as conn:
                 async with conn.transaction():
                     await conn.execute('''INSERT INTO app_runtime.tool_calls(call_id,run_id,tool_name,input_json,status,idempotency_key,provider_call_id,protocol_message)
-                        VALUES($1,$2,'search_knowledge',$3,'running',$4,$5,$6)''', call_id, self.writer.run['run_id'], args.model_dump(),
-                        self.writer.run['run_id']+':'+call['id'], call['id'], call)
+                        VALUES($1,$2,$7,$3,'running',$4,$5,$6)''', call_id, self.writer.run['run_id'], args.model_dump(),
+                        self.writer.run['run_id']+':'+call['id'], call['id'], call, name)
                     await self.processor.audit.append(self.writer.run['trace_id'], 'tool.request', {'call_id':call_id,'provider_call':call},
                         user_id=self.writer.run['user_id'], run_id=self.writer.run['run_id'], connection=conn)
-            await self.writer.emit('tool.started', {'message':'正在检索当前授权的企业知识'})
+            await self.writer.emit('tool.started', {'message':'正在检索当前授权的企业知识' if name=='search_knowledge' else '正在查询公开互联网','tool_name':name})
             try:
                 query=args.query
                 missing=[value for value in self.required_identifiers if value not in identifiers(query)]
-                if missing:
+                if missing and name=='search_knowledge':
                     query+='\n精确编号或日期：'+' '.join(missing)
-                output = await self.rag.search(query, await self.context(), self.writer.run['trace_id'], self.writer.run['run_id'])
+                context = await self.context()
+                permitted = {value['function']['name'] for value in available_tools(context,self.web is not None)}
+                if name not in permitted:
+                    raise HTTPException(403,{'code':'TOOL_PERMISSION_DENIED','message':'当前身份没有该工具的调用资格'})
+                if name=='search_knowledge':
+                    output = await self.rag.search(query,context,self.writer.run['trace_id'],self.writer.run['run_id'])
+                    for citation in output['citations']:
+                        citation['type']='knowledge'
+                else:
+                    # 搜索仅接收本次用户输入；已取得的内部证据与模型候选不进入搜索检查或生成。
+                    outbound_query(self.current_input,self.processor.audit.secrets)
+                    if self.web_output:
+                        output={**self.web_output,'reused_in_run':True,'message':'本轮相同公开任务已查询，复用同一快照，没有新搜索或新来源。请根据已观察证据回答，资料缺失则明确说明。'}
+                    else:
+                        output = await self.web.search(self.current_input,context,self.writer.run)
+                        self.web_output=output
+            except SearchError as error:
+                output = {'citations':[],'error':error.public(),'message':error.message}
             except HTTPException as error:
                 if error.status_code not in (401,403):
                     await self.fail_call(call_id,error)
@@ -127,17 +178,24 @@ class RagAgent:
             # 本轮证据标号全局递增，多个工具观察不产生相同编号指向不同原件。
             for citation in output['citations']:
                 # 多次检索可能命中同一切片，复用原标签，避免一个来源变成多张重复引用卡。
-                existing=next((row for row in self.citations if row['chunk_id']==citation['chunk_id']),None)
+                key = 'source_id' if citation.get('type')=='web' else 'chunk_id'
+                existing=next((row for row in self.citations if (row.get('url')==citation['url'] if key=='source_id' else row.get(key)==citation[key])),None)
                 citation['label']=existing['label'] if existing else str(len(self.citations)+1)
                 if existing is None:
                     self.citations.append(citation)
             self.observations.append(output)
-            observation = {'role':'tool', 'tool_call_id':call['id'], 'content':json.dumps(output,ensure_ascii=False)}
+            # 公开证据给模型的正文按片段限额，完整受限快照另存PG，避免多来源组合撑破上下文。
+            observed = model_observation(output,name)
+            observation = {'role':'tool', 'tool_call_id':call['id'], 'content':json.dumps(observed,ensure_ascii=False)}
             messages.append(observation)
             self.protocol.extend([call, observation])
             async with self.processor.pool.acquire() as conn:
                 async with conn.transaction():
-                    await conn.execute('UPDATE app_runtime.tool_calls SET status=$1,output_json=$2 WHERE call_id=$3', 'denied' if output.get('error') else 'completed', output, call_id)
+                    # 权限/外发拒绝与服务故障分开保存，失败不伪装成正常完成。
+                    code=(output.get('error') or {}).get('code','')
+                    denied=code in ('WEB_QUERY_PRIVATE','TOOL_PERMISSION_DENIED','KNOWLEDGE_NOT_AUTHORIZED')
+                    status='denied' if denied else 'failed' if code else 'completed'
+                    await conn.execute('UPDATE app_runtime.tool_calls SET status=$1,output_json=$2 WHERE call_id=$3',status,output,call_id)
                     await self.processor.audit.append(self.writer.run['trace_id'], 'tool.observation', {'call_id':call_id,'observation':observation},
                         user_id=self.writer.run['user_id'], run_id=self.writer.run['run_id'], connection=conn)
             await self.writer.emit('tool.completed', {'message':output['message']})
@@ -153,23 +211,71 @@ class RagAgent:
                 await self.processor.audit.append(self.writer.run['trace_id'],'tool.failed',{'call_id':call_id,**failure},
                     user_id=self.writer.run['user_id'],run_id=self.writer.run['run_id'],connection=conn)
 
-    async def run(self):
-        """无参数运行真实 LangGraph，结束时复核证据和引用，再返回带来源的最终模型结果。"""
-        state = await self.graph.ainvoke({'messages':[], 'turns':0, 'result':None}, {'recursion_limit':12})
+    async def review(self, state: State) -> dict:
+        """接收待发布状态，执行事实与独立语义审核；最多一次返工，异常/二次驳回明确受限交付。"""
+        await self.guard()
+        await self.writer.emit('review.started',{'message':'正在核验本轮执行过程和答案'})
+        try:
+            decision,issues = await evaluate(self,state)
+            record = {'round':len(state['reviews'])+1,**decision.model_dump(),'backend_issues':issues}
+        except GatewayError as error:
+            # 权限/证据变化属于安全停止，不能降级交付仍含旧正文的资料摘录。
+            if error.code in ('RAG_EVIDENCE_CHANGED','UNAUTHENTICATED','FORBIDDEN','EXECUTION_RECORD_INVALID'):
+                raise
+            record = {'round':len(state['reviews'])+1,'verdict':'unavailable','error':error.public()}
+        await self.processor.audit.append(self.writer.run['trace_id'],'answer.review',record,
+            user_id=self.writer.run['user_id'],run_id=self.writer.run['run_id'],conversation_id=self.writer.run['conversation_id'])
+        reviews = state['reviews']+[record]
+        if record['verdict']=='approve':
+            await self.writer.emit('review.completed',{'message':'答案核验通过'})
+            return {'reviews':reviews,'review_status':'approved'}
+        if record['verdict']=='revise' and state['revisions']==0 and state['turns']<11:
+            await self.writer.emit('review.revision',{'message':'发现需要修正的问题，正在补充核验；最多返工一次'})
+            # 反馈是结构化数据；主模型保留已有工具状态，不能重跑副作用或绕过权限/外发边界。
+            feedback = {'role':'system','content':'服务器发布前审核未通过。请参考以下问题修正答案，必要时继续调用当前允许工具。不要仅声称已修正；工具动作必须实际执行。不得绕过安全拒绝、重复已完成的副作用，或把内部证据用于公开搜索。若无合理路径请明确限制。审核问题数据：'+json.dumps(record.get('issues',[]),ensure_ascii=False)}
+            return {'messages':state['messages']+[feedback],'reviews':reviews,'revisions':1,'review_status':'revise'}
+        status = 'unavailable' if record['verdict']=='unavailable' else 'limited'
+        await self.writer.emit('review.limited',{'message':'未形成通过核验的完整答案，将说明本轮资料与限制'})
+        return {'reviews':reviews,'review_status':status}
+
+    def review_route(self, state: State):
+        """接收审核状态，只有首次明确返工才能回模型，其他结论均进入受控发布。"""
+        return 'model' if state['review_status']=='revise' else 'publish'
+
+    async def publish(self, state: State) -> dict:
+        """接收最终审核状态，复验权限后发布通过答案或服务端资料摘录；不展示未审核草稿/审核JSON。"""
         await self.guard()
         result = state['result']
+        if state['review_status']!='approved':
+            result.content = limited_answer(self.citations,state['review_status'])
         # 无相关证据时由服务端守住内部事实边界，即便模型试图补写制度也不能作为有依据回答展示。
-        if self.observations and not self.citations:
-            denied = any(value.get('error') for value in self.observations)
-            result.content = '当前未获得知识库权限，请联系管理员分配部门和职级后再查询。' if denied else '未找到足够相关且有权访问的企业知识，无法确定该内部规定。请提供正式文件或请管理员补充知识材料。'
+        elif self.observations and not self.citations:
+            # 没有资料不等于无权限；真实错误逐项说明，不把服务故障误报为全库无内容。
+            result.content = '本轮检索没有取得可引用资料，无法确定依赖这些资料的结论。'
+            errors = [value['message'] for value in self.observations if value.get('error')]
+            if errors:
+                result.content += ' '+'；'.join(dict.fromkeys(errors))
+            else:
+                result.content += '请缩小检索主题或补充正式资料。'
             result.message['content'] = result.content
         import re
-        if self.observations and any(number not in {row['label'] for row in self.citations} for number in re.findall(r'\[(\d+)\]', result.content)):
+        if state['review_status']=='approved' and self.observations and any(number not in {row['label'] for row in self.citations} for number in re.findall(r'\[(\d+)\]', result.content)):
             raise GatewayError('INVALID_CITATION', '回答引用了未提供的来源，已停止发布，请重新提问')
         result.message['citations'] = self.citations
         result.message['agent_protocol'] = self.protocol
+        result.message['answer_review'] = {'status':state['review_status'],'revisions':state['revisions'],'rounds':state['reviews']}
+        result.message['content'] = result.content
         await self.writer.emit('assistant.reset', {'reason':'final_answer'})
         # 普通知识问题仍展示分段文字，RAG 结果先完成最后权限复核再交付，避免旧证据流出。
         for offset in range(0,len(result.content),96):
             await self.writer.emit('assistant.delta', {'text':result.content[offset:offset+96]})
-        return result
+        return {'result':result}
+
+    async def run(self):
+        """无参数运行模型/工具/审核/发布图，返回最终结果；整体轮次、工具次数、超时仍采用原运行预算。"""
+        try:
+            state = await self.graph.ainvoke({'messages':[], 'turns':0, 'result':None,'revisions':0,'reviews':[],'review_status':''}, {'recursion_limit':36})
+        except NodeCancelledError as error:
+            # LangGraph将节点主动取消包装为普通异常，恢复取消语义交给任务处理器区分本人停止/进程中断。
+            raise asyncio.CancelledError() from error
+        return state['result']

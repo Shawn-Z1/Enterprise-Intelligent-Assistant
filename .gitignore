@@ -32,6 +32,10 @@ coverage/
 *.log
 *.pid
 
+# 分词器下载缓存通过版本清单和构建脚本重建，不将大词表纳入Git。
+/backend/tokenizer_assets/*.json.cache
+/backend/tokenizer_assets/deepseek-v41.json
+
 # 操作系统生成的文件。
 .DS_Store
 Thumbs.db
