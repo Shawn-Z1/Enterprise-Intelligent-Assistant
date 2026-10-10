@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type Keyboard
 import { ArrowUp, Check, MessageSquare, Pencil, Square, X } from 'lucide-react';
 import { apiRequest, beijingTime, requestId, citationPages, citationTitle, type ChatEvent, type ChatMessage, type ChatRun, type Conversation, type ConversationDetail, type Citation } from './api';
 import { SourcePanel } from './SourcePanel';
+import { MarkdownReply } from './MarkdownReply';
 
 interface Props { conversationId: string | null; revision: number; userName: string; select: (id: string) => void; changed: () => Promise<void>; }
 const labels = {pending:'等待处理',running:'正在回答',completed:'回答完成',failed:'回答失败',cancelled:'已停止',interrupted:'执行中断'};
@@ -145,12 +146,12 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
       {loading ? <p role="status">正在读取已保存的会话…</p> : messages.length===0 && !busy ? <div className="chat-empty"><MessageSquare size={32} aria-hidden="true" /><h2>{userName}，从一个问题开始。</h2><p>讨论工作思路，或查询你有权访问的企业知识。<br />回答引用可打开原文，核实页码与依据。</p></div> : null}
       {messages.map(message => <article className={`chat-message ${message.role}`} key={message.message_id}>
         <div className="message-meta"><strong>{message.role==='user' ? '你' : '知行'}</strong><time dateTime={message.created_at}>{beijingTime(message.created_at)}</time></div>
-        <div className="message-content">{message.content}</div>
+        {message.role==='assistant' ? <MarkdownReply content={message.content}/> : <div className="message-content">{message.content}</div>}
         {!!message.citations?.length && <div className="message-sources" aria-label="回答引用">{message.citations.map(source=><button key={source.label} onClick={()=>setCitation(source)} aria-label={`来源 ${source.label} ${citationTitle(source)}`}>[{source.label}] {citationTitle(source)}{citationPages(source) ? ` · ${citationPages(source)}` : ''}</button>)}</div>}
         {message.finish_reason==='length' && <p className="message-limit-note">达到单次输出上限，可继续提问。</p>}
         {message.role==='user' && message.error && <p className="run-error">{message.error.message}</p>}
       </article>)}
-      {liveText && run?.status!=='completed' && <article className="chat-message assistant live-reply"><div className="message-meta"><strong>知行</strong><span>{busy ? '正在回答' : '未完成的回答'}</span></div><div className="message-content">{liveText}</div></article>}
+      {liveText && run?.status!=='completed' && <article className="chat-message assistant live-reply"><div className="message-meta"><strong>知行</strong><span>{busy ? '正在回答' : '未完成的回答'}</span></div><MarkdownReply content={liveText}/></article>}
       {run && <div className={`chat-run-state ${run.status}`} role="status"><span className={busy || run.status==='completed' ? 'status-dot healthy' : 'status-dot'} />{busy ? stage || labels[run.status] : labels[run.status]}{run.error && <span>{run.error.message}</span>}</div>}
       {events.length>0 && <details className="chat-execution"><summary>查看本次执行记录</summary><ol>{events.filter(item=>item.type!=='assistant.delta' && item.type!=='assistant.reset').map(item=><li key={item.sequence}><time>{beijingTime(item.timestamp)}</time><span>{item.data.message || (item.type==='model.attempt_failed' ? '模型调用失败' : item.type==='run.queued' ? '等待处理' : item.type==='run.started' ? '开始处理' : item.type==='run.completed' ? '回答完成' : item.type==='run.cancelled' ? '已停止' : item.type)}</span></li>)}</ol></details>}
       <div ref={bottom} />

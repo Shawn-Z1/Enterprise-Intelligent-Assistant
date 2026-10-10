@@ -276,6 +276,33 @@ nav { display: grid; gap: 5px; }
 .message-meta { display: flex; align-items: center; gap: 14px; margin-bottom: 11px; font-size: 15px; color: var(--muted); }
 .message-meta strong { font-size: 17px; color: #263244; }
 .message-content { white-space: pre-wrap; font-size: 16px; line-height: 1.5; }
+/* 模型正文采用Markdown排版；用户原文继续保留换行，表格和代码只在自身容器横向滚动。 */
+.message-content.message-markdown { white-space: normal; line-height: 1.7; }
+.message-markdown > :first-child { margin-top: 0; }
+.message-markdown > :last-child { margin-bottom: 0; }
+.message-markdown :is(h1,h2,h3,h4,h5,h6) { margin: 1.2em 0 .5em; line-height: 1.35; font-weight: 700; color: #263244; }
+.message-markdown h1 { font-size: 1.5em; }
+.message-markdown h2 { font-size: 1.3em; }
+.message-markdown h3 { font-size: 1.15em; }
+.message-markdown :is(h4,h5,h6) { font-size: 1em; }
+.message-markdown p { margin: .7em 0; white-space: pre-wrap; }
+.message-markdown :is(ul,ol) { margin: .7em 0; padding-left: 1.5em; }
+.message-markdown li { margin: .25em 0; }
+.message-markdown li > p { margin: .3em 0; }
+.message-markdown strong { font-weight: 700; }
+.message-markdown a { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
+.message-markdown a:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.message-markdown blockquote { margin: .8em 0; border-left: 3px solid #a5b2c5; padding: .1em 1em; color: #405673; }
+.message-markdown code { font-family: Consolas, 'Courier New', monospace; font-size: .9em; background: #edf3fa; border-radius: 4px; padding: .12em .3em; }
+.message-markdown pre { margin: .8em 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 6px; background: #f5f7fa; overflow-x: auto; white-space: pre; line-height: 1.55; }
+.message-markdown pre code { padding: 0; background: none; border-radius: 0; }
+.message-markdown hr { border: 0; border-top: 1px solid var(--line); margin: 1.2em 0; }
+.markdown-table { max-width: 100%; overflow-x: auto; margin: .8em 0; }
+.markdown-table table { width: 100%; border-collapse: collapse; font-size: .95em; }
+.markdown-table :is(th,td) { border: 1px solid var(--line); padding: 8px 12px; min-width: 100px; }
+.markdown-table th { background: #edf3fa; font-weight: 700; }
+.message-markdown .task-list-item { list-style: none; }
+.message-markdown .task-list-item input { width: auto; margin-right: .5em; }
 .message-limit-note { font-size: 14px; color: var(--muted); margin: 12px 0 0; }
 .chat-run-state { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 15px; padding: 10px 0; color: #415879; }
 .chat-run-state.failed, .chat-run-state.interrupted, .run-error { color: #a52a36; }
