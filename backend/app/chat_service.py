@@ -6,6 +6,9 @@ from app.audit import AuditRecorder, Usage, redact_secrets
 from app.context import ContextAssembler
 from app.ids import new_id
 from app.model_gateway import GatewayError, ModelGateway, ModelResult
+from app.sensitive_actions import HumanSecondaryConfirmationHook
+from app.business_sql import BusinessSqlService
+from app.sensitive_actions import public_action
 
 logger = logging.getLogger("zhixing.chat")
 TERMINAL = {"completed","failed","cancelled","interrupted"}
@@ -19,7 +22,7 @@ def public_run(row: dict) -> dict:
     """接收内部执行行，返回本人可见状态及安全错误，排除输入上下文、租约和内部模型响应。"""
     state = row.get('state_json') or {}
     return {key:row[key] for key in ('run_id','trace_id','conversation_id','status','created_at','updated_at')} | {
-        'error':state.get('error'),'model':state.get('model'),'slot':state.get('slot'),'cancel_requested':row.get('cancel_requested',False)}
+        'error':state.get('error'),'model':state.get('model'),'slot':state.get('slot'),'cancel_requested':row.get('cancel_requested',False),'pending_action':state.get('pending_action')}
 
 
 class RunWriter:
@@ -39,19 +42,33 @@ class RunWriter:
         """接收网关公开事件，在当前任务锁内检查取消和禁用后持久追加；返回无凭证事件，不传隐藏思考。"""
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                row = await conn.fetchrow('SELECT r.status,r.cancel_requested,u.status AS user_status FROM app_runtime.runs r JOIN app_system.users u USING(user_id) WHERE r.run_id=$1 FOR UPDATE OF r',self.run['run_id'])
+                row = await conn.fetchrow('SELECT r.status,r.cancel_requested,r.lease_owner,u.status AS user_status FROM app_runtime.runs r JOIN app_system.users u USING(user_id) WHERE r.run_id=$1 FOR UPDATE OF r',self.run['run_id'])
                 if row['cancel_requested'] or row['user_status']!='active':
                     raise RunCancelled()
                 if row['status'] in TERMINAL:
                     raise RunCancelled()
+                if self.run.get('lease_owner') and row['lease_owner']!=self.run['lease_owner']:raise RunCancelled()
                 await self.append_event(conn,kind,data)
 
     async def check_active(self):
         """无参数只核验本任务仍运行且用户未取消/禁用；缓冲模型输出时不追加无意义的逐token事件。"""
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow('SELECT r.status,r.cancel_requested,u.status AS user_status FROM app_runtime.runs r JOIN app_system.users u USING(user_id) WHERE r.run_id=$1',self.run['run_id'])
+            row = await conn.fetchrow('SELECT r.status,r.cancel_requested,r.lease_owner,u.status AS user_status FROM app_runtime.runs r JOIN app_system.users u USING(user_id) WHERE r.run_id=$1',self.run['run_id'])
         if row is None or row['cancel_requested'] or row['user_status']!='active' or row['status'] in TERMINAL:
             raise RunCancelled()
+        if self.run.get('lease_owner') and row['lease_owner']!=self.run['lease_owner']:raise RunCancelled()
+
+    async def suspend(self,action_id):
+        """接收已保存检查点的待确认动作，在run锁内发布确认事件并释放租约；等待不占worker执行槽。"""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                run=await conn.fetchrow('SELECT * FROM app_runtime.runs WHERE run_id=$1 FOR UPDATE',self.run['run_id'])
+                if run['cancel_requested'] or run['status']!='running':raise RunCancelled()
+                action=await conn.fetchrow('SELECT * FROM app_runtime.query_approvals WHERE approval_id=$1 AND run_id=$2 AND decision=\'pending\'',action_id,self.run['run_id'])
+                if action is None:raise GatewayError('ACTION_STATE_CHANGED','待确认动作状态已变化')
+                await conn.execute("UPDATE app_runtime.runs SET status='waiting_confirmation',state_json=state_json || $1::jsonb,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE run_id=$2",{'pending_action':action_id},self.run['run_id'])
+                await self.append_event(conn,'confirmation.required',{'message':'敏感操作尚未执行，请确认本次操作','action':public_action(dict(action)),'status':'waiting_confirmation'})
+                await self.audit.append(self.run['trace_id'],'run.waiting_confirmation',{'action_id':action_id},user_id=self.run['user_id'],run_id=self.run['run_id'],connection=conn)
 
     async def record_model(self, kind: str, data: dict, usage: Usage | None):
         """接收模型实际请求、原始包或结果，在同一事务中保存尝试与永久审计；失败则阻止后续模型调用。"""
@@ -74,9 +91,11 @@ class RunWriter:
         """接收终态、安全错误或成功模型结果，原子落原始回复、终态事件和审计；同一 run 最多一条助手回复。"""
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                row = await conn.fetchrow('SELECT status,cancel_requested,state_json FROM app_runtime.runs WHERE run_id=$1 FOR UPDATE',self.run['run_id'])
+                row = await conn.fetchrow('SELECT status,cancel_requested,state_json,lease_owner FROM app_runtime.runs WHERE run_id=$1 FOR UPDATE',self.run['run_id'])
                 if row['status'] in TERMINAL and not row['state_json'].get('audit_pending'):
                     return
+                # 旧worker失去租约不能覆盖新worker的运行或已恢复队列；本人取消仍可收尾。
+                if self.run.get('lease_owner') and row['lease_owner']!=self.run['lease_owner'] and not row['cancel_requested']:return
                 if result and row['cancel_requested']:
                     status,result,error = 'cancelled',None,{'code':'RUN_CANCELLED','message':'本次回答已停止'}
                 payload = {'status':status,'error':error}
@@ -106,6 +125,8 @@ class ChatProcessor:
         self.worker_id = worker_id or new_id()
         self.rag = rag
         self.web = web
+        self.hook=HumanSecondaryConfirmationHook(pool,audit)
+        self.business=BusinessSqlService(pool,settings,gateway,audit,self.hook)
 
     async def claim(self) -> dict | None:
         """无参数，在短事务中通过 SKIP LOCKED 领取一个待执行任务及租约，返回可信身份任务或空。"""
@@ -117,6 +138,7 @@ class ChatProcessor:
                 await conn.execute("UPDATE app_runtime.runs SET status='running',lease_owner=$1,lease_until=now()+$2*interval '1 second',updated_at=now() WHERE run_id=$3",self.worker_id,self.settings.run_lease_seconds,row['run_id'])
                 result = dict(row)
                 result['status'] = 'running'
+                result['lease_owner']=self.worker_id
                 writer = RunWriter(self.pool,self.audit,result)
                 await writer.append_event(conn,'run.started',{'message':'已开始处理你的问题'})
                 await self.audit.append(row['trace_id'],'run.started',{'worker_id':self.worker_id},span_id=row['run_id'],span_name='chat.run',
@@ -137,8 +159,26 @@ class ChatProcessor:
     async def recover(self):
         """无参数，明确结束租约已失效的运行并补录审计失败状态；不自动重复可能已发出的模型请求。"""
         async with self.pool.acquire() as conn:
+            unresolved=await conn.fetch("SELECT a.approval_id,r.* FROM app_runtime.query_approvals a JOIN app_runtime.runs r USING(run_id) WHERE a.decision='executing' AND r.status IN ('failed','cancelled','interrupted')")
+            for item in unresolved:
+                async with conn.transaction():
+                    await conn.execute("UPDATE app_runtime.query_approvals SET decision='unknown',execution_token_hash=NULL WHERE approval_id=$1 AND decision='executing'",item['approval_id'])
+                    await self.audit.append(item['trace_id'],'action.unknown',{'action_id':item['approval_id'],'reason':'任务结束前没有持久回执，禁止自动重跑'},user_id=item['user_id'],run_id=item['run_id'],connection=conn)
+            # 失效的等待只恢复协议以说明拒绝，不在恢复扫描执行SQL。
+            waiting=await conn.fetch("SELECT r.*,a.approval_id FROM app_runtime.runs r JOIN app_runtime.query_approvals a ON a.approval_id=r.state_json->>'pending_action' JOIN app_system.users u ON u.user_id=r.user_id JOIN app_system.auth_sessions s ON s.session_id=r.state_json->>'auth_session_id' WHERE r.status='waiting_confirmation' AND (a.expires_at<=now() OR a.decision<>'pending' OR u.permission_version<>a.permission_version OR u.status<>'active' OR s.revoked_at IS NOT NULL OR s.expires_at<=now())")
+            for row in waiting:
+                async with conn.transaction():
+                    await conn.execute("UPDATE app_runtime.query_approvals SET decision=CASE WHEN expires_at<=now() THEN 'expired' ELSE 'invalidated' END WHERE approval_id=$1 AND decision='pending'",row['approval_id'])
+                    await conn.execute("UPDATE app_runtime.runs SET status='pending',state_json=state_json || $1::jsonb WHERE run_id=$2 AND status='waiting_confirmation'",{'resume_action':row['approval_id']},row['run_id'])
             rows = await conn.fetch("SELECT * FROM app_runtime.runs WHERE (status='running' AND lease_until<now()) OR state_json->>'audit_pending'='true'")
         for row in rows:
+            if row['state_json'].get('resume_action') and not row['state_json'].get('audit_pending'):
+                async with self.pool.acquire() as conn:
+                    async with conn.transaction():
+                        # 已领取但尚未保存回执的执行标未知；后续节点只能回填错误，不重发SQL。
+                        await conn.execute("UPDATE app_runtime.query_approvals SET decision='unknown',execution_token_hash=NULL WHERE run_id=$1 AND decision='executing'",row['run_id'])
+                        await conn.execute("UPDATE app_runtime.runs SET status='pending',lease_owner=NULL,lease_until=NULL WHERE run_id=$1 AND status='running' AND lease_until<now()",row['run_id'])
+                continue
             writer = RunWriter(self.pool,self.audit,dict(row))
             error = row['state_json'].get('error') or {'code':'RUN_INTERRUPTED','message':'后台进程中断，本次回答已结束；可重新发送问题'}
             await writer.finish('failed' if row['state_json'].get('audit_pending') else 'interrupted',error)
@@ -147,17 +187,19 @@ class ChatProcessor:
         """接收已领取任务，组装本人历史、调用模型并保存回复；取消、超时和异常均明确终止，不伪造成功。"""
         writer = RunWriter(self.pool,self.audit,run)
         renewal = asyncio.create_task(self.renew(run,asyncio.current_task()))
+        started=monotonic()
         try:
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch('SELECT m.* FROM app_runtime.messages m WHERE conversation_id=$1 AND user_id=$2 ORDER BY message_order',run['conversation_id'],run['user_id'])
             assembler = ContextAssembler([dict(row) for row in rows],run['run_id'],self.settings.model_output_tokens)
-            async with asyncio.timeout(self.settings.run_timeout_seconds):
+            remaining=self.settings.run_timeout_seconds-run['state_json'].get('active_elapsed',0)
+            async with asyncio.timeout(max(0.01,remaining)):
                 if self.rag:
                     from app.rag_agent import RagAgent
                     result = await RagAgent(self,self.rag,writer,[dict(row) for row in rows]).run()
                 else:
                     result = await self.gateway.complete(assembler.assemble,writer.record_model,writer.emit)
-                await writer.finish('completed',result=result)
+                if result is not None:await writer.finish('completed',result=result)
         except asyncio.CancelledError:
             async with self.pool.acquire() as conn:
                 cancelled = await conn.fetchval('SELECT r.cancel_requested OR u.status<>\'active\' FROM app_runtime.runs r JOIN app_system.users u USING(user_id) WHERE run_id=$1',run['run_id'])
@@ -177,3 +219,5 @@ class ChatProcessor:
         finally:
             renewal.cancel()
             await asyncio.gather(renewal,return_exceptions=True)
+            async with self.pool.acquire() as conn:
+                await conn.execute("UPDATE app_runtime.runs SET state_json=state_json || jsonb_build_object('active_elapsed',COALESCE((state_json->>'active_elapsed')::double precision,0)+$1::double precision) WHERE run_id=$2",monotonic()-started,run['run_id'])

@@ -1,17 +1,19 @@
-"""LangGraph 的模型→真实 RAG 工具→观察→模型回答循环。"""
+"""LangGraph真实模型→工具→敏感动作确认→观察→审核→发布循环。"""
 import asyncio
 import json
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.errors import NodeCancelledError
+from langgraph.types import Command, interrupt
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException
 
 from app.context import ContextAssembler
 from app.answer_review import evaluate, limited_answer
 from app.ids import new_id
-from app.model_gateway import GatewayError, estimate_tokens
+from app.model_gateway import GatewayError, estimate_tokens, pack_result, unpack_result
+from app.graph_checkpoint import PgGraphSaver
 from app.rag_service import live_context
 from app.rag_index import identifiers
 from app.tool_registry import available_tools, model_observation
@@ -25,10 +27,17 @@ class Arguments(BaseModel):
 class State(TypedDict):
     messages: list[dict]
     turns: int
-    result: object
+    result: dict | None
     revisions: int
     reviews: list[dict]
     review_status: str
+    citations: list[dict]
+    observations: list[dict]
+    protocol: list[dict]
+    web_output: dict | None
+    tool_index: int
+    pending_action: str | None
+    tools_route: str
 
 
 class RagAgent:
@@ -51,14 +60,20 @@ class RagAgent:
         builder = StateGraph(State)
         builder.add_node('model', self.model)
         builder.add_node('tools', self.tools)
+        builder.add_node('confirmation',self.confirmation)
         builder.add_node('review', self.review)
         builder.add_node('publish', self.publish)
         builder.add_edge(START, 'model')
         builder.add_conditional_edges('model', self.route, ['tools', 'review'])
-        builder.add_edge('tools', 'model')
+        builder.add_conditional_edges('tools',lambda state:state['tools_route'],['tools','confirmation','model'])
+        builder.add_edge('confirmation','tools')
         builder.add_conditional_edges('review', self.review_route, ['model','publish'])
         builder.add_edge('publish', END)
-        self.graph = builder.compile()
+        self.graph = builder.compile(checkpointer=PgGraphSaver(processor.pool,writer.run['run_id']))
+
+    def sync_state(self,state):
+        """接收持久图状态，将证据/观察/协议及公开快照还原到当前实例，跨worker恢复不依赖内存。"""
+        self.citations,self.observations,self.protocol,self.web_output=state['citations'],state['observations'],state['protocol'],state['web_output']
 
     async def context(self):
         """无参数从运行创建时保存的登录会话重读当前身份；模型无法指定或覆盖此身份。"""
@@ -81,6 +96,9 @@ class RagAgent:
         if not self.citations:
             return
         internal = [row for row in self.citations if row.get('type','knowledge')=='knowledge']
+        business=[row for row in self.citations if row.get('type')=='business']
+        if business and (not context.can_query_business or any(row.get('permission_version')!=context.permission_version for row in business)):
+            raise GatewayError('BUSINESS_EVIDENCE_CHANGED','业务权限已变化，本次回答已停止，请重新提问')
         if not internal:
             return
         context, chunks = await self.rag.validate(context, [row['chunk_id'] for row in internal])
@@ -93,7 +111,7 @@ class RagAgent:
         self.current_tools = available_tools(context,self.web is not None)
         # 历史内部证据轮次整体不复送；原历史/审计保留，内部事实需重新检索。
         excluded = {row.get('run_id') for row in self.assembler.rows if row['role']=='assistant' and
-                    any(value.get('type','knowledge')=='knowledge' for value in (row.get('protocol_json') or {}).get('message',{}).get('citations',[]))}
+                    any(value.get('type','knowledge') in ('knowledge','business') for value in (row.get('protocol_json') or {}).get('message',{}).get('citations',[]))}
         self.assembler.rows = [row for row in self.assembler.rows if row.get('run_id')==self.writer.run['run_id'] or row.get('run_id') not in excluded]
         return self.current_tools
 
@@ -108,27 +126,29 @@ class RagAgent:
         """接收图状态，实际调用文本模型自主选择回答或 tool_calls，返回标准结果及递增轮次。"""
         if state['turns']>=11:
             raise GatewayError('AGENT_STEP_LIMIT', '本次检索步骤超过限制，请缩短问题再试')
+        self.sync_state(state)
         self.current_state = state
         await self.guard()
         result = await self.processor.gateway.complete(self.factory, self.writer.record_model, self.emit, self.tool_schemas, self.guard)
         result.message['_provider'] = result.provider
-        return {'messages':state['messages']+[result.message], 'result':result, 'turns':state['turns']+1}
+        return {'messages':state['messages']+[result.message], 'result':pack_result(result), 'turns':state['turns']+1,'tool_index':0}
 
     def route(self, state: State):
         """接收模型真实结果，有调用则执行工具，无调用进入独立审核，普通直接回答也不能跳过审核。"""
-        return 'tools' if state['result'].message.get('tool_calls') else 'review'
+        return 'tools' if state['result']['message'].get('tool_calls') else 'review'
 
     async def tools(self, state: State) -> dict:
         """接收真实模型工具调用，严格校验工具和参数，记录完整观察，返回配对 tool 消息供模型继续回答。"""
-        calls = state['result'].message['tool_calls']
+        self.sync_state(state)
+        calls = state['result']['message']['tool_calls']
         if not 1<=len(calls)<=3:
             raise GatewayError('TOOL_CALL_LIMIT', '本次工具调用数量超过限制')
         messages = list(state['messages'])
-        if len(self.observations)+len(calls)>10:
+        if len(self.observations)+len(calls)-state['tool_index']>10:
             raise GatewayError('TOOL_CALL_LIMIT','整轮工具调用达到10次上限，请缩小任务')
-        for call in calls:
+        for call in calls[state['tool_index']:state['tool_index']+1]:
             name = call.get('function',{}).get('name')
-            if not call.get('id') or len(call['id'])>200 or call.get('type')!='function' or name not in ('search_knowledge','search_web'):
+            if not call.get('id') or len(call['id'])>200 or call.get('type')!='function' or name not in ('search_knowledge','search_web','query_business_data'):
                 raise GatewayError('TOOL_NOT_ALLOWED', '模型请求了未开放的工具，已停止执行')
             try:
                 args = Arguments.model_validate_json(call['function']['arguments'])
@@ -137,12 +157,16 @@ class RagAgent:
             call_id = new_id()
             async with self.processor.pool.acquire() as conn:
                 async with conn.transaction():
-                    await conn.execute('''INSERT INTO app_runtime.tool_calls(call_id,run_id,tool_name,input_json,status,idempotency_key,provider_call_id,protocol_message)
+                    existing=await conn.fetchrow('SELECT * FROM app_runtime.tool_calls WHERE idempotency_key=$1',self.writer.run['run_id']+':'+call['id'])
+                    if existing:
+                        call_id=existing['call_id']
+                    else:
+                        await conn.execute('''INSERT INTO app_runtime.tool_calls(call_id,run_id,tool_name,input_json,status,idempotency_key,provider_call_id,protocol_message)
                         VALUES($1,$2,$7,$3,'running',$4,$5,$6)''', call_id, self.writer.run['run_id'], args.model_dump(),
                         self.writer.run['run_id']+':'+call['id'], call['id'], call, name)
                     await self.processor.audit.append(self.writer.run['trace_id'], 'tool.request', {'call_id':call_id,'provider_call':call},
                         user_id=self.writer.run['user_id'], run_id=self.writer.run['run_id'], connection=conn)
-            await self.writer.emit('tool.started', {'message':'正在检索当前授权的企业知识' if name=='search_knowledge' else '正在查询公开互联网','tool_name':name})
+            await self.writer.emit('tool.started', {'message':'正在准备或恢复业务查询' if name=='query_business_data' else '正在检索当前授权的企业知识' if name=='search_knowledge' else '正在查询公开互联网','tool_name':name})
             try:
                 query=args.query
                 missing=[value for value in self.required_identifiers if value not in identifiers(query)]
@@ -152,11 +176,22 @@ class RagAgent:
                 permitted = {value['function']['name'] for value in available_tools(context,self.web is not None)}
                 if name not in permitted:
                     raise HTTPException(403,{'code':'TOOL_PERMISSION_DENIED','message':'当前身份没有该工具的调用资格'})
-                if name=='search_knowledge':
+                if existing and existing['output_json']:
+                    output=existing['output_json']
+                elif name=='query_business_data':
+                    async with self.processor.pool.acquire() as conn:
+                        action=await conn.fetchrow('SELECT * FROM app_runtime.query_approvals WHERE call_id=$1',call_id)
+                    if action is None:action=await self.processor.business.prepare(query,context,self.writer.run,call_id,self.writer,self.guard)
+                    if action['decision']=='pending':
+                        return {'pending_action':action['approval_id'],'tools_route':'confirmation'}
+                    output=await self.processor.business.execute(action['approval_id'],context,self.writer.run)
+                elif name=='search_knowledge':
+                    self.processor.hook.policy('knowledge.read')
                     output = await self.rag.search(query,context,self.writer.run['trace_id'],self.writer.run['run_id'])
                     for citation in output['citations']:
                         citation['type']='knowledge'
                 else:
+                    self.processor.hook.policy('public.search')
                     # 搜索仅接收本次用户输入；已取得的内部证据与模型候选不进入搜索检查或生成。
                     outbound_query(self.current_input,self.processor.audit.secrets)
                     if self.web_output:
@@ -167,18 +202,21 @@ class RagAgent:
             except SearchError as error:
                 output = {'citations':[],'error':error.public(),'message':error.message}
             except HTTPException as error:
-                if error.status_code not in (401,403):
+                if name=='query_business_data':
+                    output={'citations':[],'error':error.detail,'message':error.detail.get('message','业务查询未执行') if isinstance(error.detail,dict) else '业务查询未执行'}
+                elif error.status_code not in (401,403):
                     await self.fail_call(call_id,error)
                     detail=error.detail if isinstance(error.detail,dict) else {'code':'RAG_FAILED','message':'知识检索未完成，请重试'}
                     raise GatewayError(detail['code'],detail['message'])
-                output = {'citations':[], 'error':error.detail, 'message':'知识权限不足或登录已失效，请联系管理员开通知识权限；未进行越权检索。'}
+                else:
+                    output = {'citations':[], 'error':error.detail, 'message':'知识权限不足或登录已失效，请联系管理员开通知识权限；未进行越权检索。'}
             except BaseException as error:
                 await self.fail_call(call_id,error)
                 raise
             # 本轮证据标号全局递增，多个工具观察不产生相同编号指向不同原件。
             for citation in output['citations']:
                 # 多次检索可能命中同一切片，复用原标签，避免一个来源变成多张重复引用卡。
-                key = 'source_id' if citation.get('type')=='web' else 'chunk_id'
+                key = 'result_id' if citation.get('type')=='business' else 'source_id' if citation.get('type')=='web' else 'chunk_id'
                 existing=next((row for row in self.citations if (row.get('url')==citation['url'] if key=='source_id' else row.get(key)==citation[key])),None)
                 citation['label']=existing['label'] if existing else str(len(self.citations)+1)
                 if existing is None:
@@ -193,13 +231,20 @@ class RagAgent:
                 async with conn.transaction():
                     # 权限/外发拒绝与服务故障分开保存，失败不伪装成正常完成。
                     code=(output.get('error') or {}).get('code','')
-                    denied=code in ('WEB_QUERY_PRIVATE','TOOL_PERMISSION_DENIED','KNOWLEDGE_NOT_AUTHORIZED')
+                    denied=code in ('WEB_QUERY_PRIVATE','TOOL_PERMISSION_DENIED','KNOWLEDGE_NOT_AUTHORIZED','BUSINESS_NOT_AUTHORIZED','BUSINESS_SCOPE_DENIED','SQL_NOT_ALLOWED','ACTION_NOT_APPROVED','ACTION_REJECTED','ACTION_INVALIDATED')
                     status='denied' if denied else 'failed' if code else 'completed'
                     await conn.execute('UPDATE app_runtime.tool_calls SET status=$1,output_json=$2 WHERE call_id=$3',status,output,call_id)
                     await self.processor.audit.append(self.writer.run['trace_id'], 'tool.observation', {'call_id':call_id,'observation':observation},
                         user_id=self.writer.run['user_id'], run_id=self.writer.run['run_id'], connection=conn)
             await self.writer.emit('tool.completed', {'message':output['message']})
-        return {'messages':messages}
+        index=state['tool_index']+1
+        return {'messages':messages,'tool_index':index,'pending_action':None,'tools_route':'tools' if index<len(calls) else 'model',
+                'citations':self.citations,'observations':self.observations,'protocol':self.protocol,'web_output':self.web_output}
+
+    async def confirmation(self,state: State):
+        """接收已准备动作，在敏感操作边界暂停；恢复值只用于定位，真正批准仍由PG与Hook检查。"""
+        interrupt({'action_id':state['pending_action']})
+        return {'tools_route':'tools'}
 
     async def fail_call(self,call_id,error):
         """接收内部调用编号和异常，持久记录失败或中断及安全原因，不留下伪运行状态或供应商凭证。"""
@@ -213,6 +258,7 @@ class RagAgent:
 
     async def review(self, state: State) -> dict:
         """接收待发布状态，执行事实与独立语义审核；最多一次返工，异常/二次驳回明确受限交付。"""
+        self.sync_state(state)
         await self.guard()
         await self.writer.emit('review.started',{'message':'正在核验本轮执行过程和答案'})
         try:
@@ -220,7 +266,7 @@ class RagAgent:
             record = {'round':len(state['reviews'])+1,**decision.model_dump(),'backend_issues':issues}
         except GatewayError as error:
             # 权限/证据变化属于安全停止，不能降级交付仍含旧正文的资料摘录。
-            if error.code in ('RAG_EVIDENCE_CHANGED','UNAUTHENTICATED','FORBIDDEN','EXECUTION_RECORD_INVALID'):
+            if error.code in ('RAG_EVIDENCE_CHANGED','BUSINESS_EVIDENCE_CHANGED','UNAUTHENTICATED','FORBIDDEN','EXECUTION_RECORD_INVALID'):
                 raise
             record = {'round':len(state['reviews'])+1,'verdict':'unavailable','error':error.public()}
         await self.processor.audit.append(self.writer.run['trace_id'],'answer.review',record,
@@ -244,8 +290,9 @@ class RagAgent:
 
     async def publish(self, state: State) -> dict:
         """接收最终审核状态，复验权限后发布通过答案或服务端资料摘录；不展示未审核草稿/审核JSON。"""
+        self.sync_state(state)
         await self.guard()
-        result = state['result']
+        result = unpack_result(state['result'])
         if state['review_status']!='approved':
             result.content = limited_answer(self.citations,state['review_status'])
         # 无相关证据时由服务端守住内部事实边界，即便模型试图补写制度也不能作为有依据回答展示。
@@ -269,13 +316,20 @@ class RagAgent:
         # 普通知识问题仍展示分段文字，RAG 结果先完成最后权限复核再交付，避免旧证据流出。
         for offset in range(0,len(result.content),96):
             await self.writer.emit('assistant.delta', {'text':result.content[offset:offset+96]})
-        return {'result':result}
+        return {'result':pack_result(result)}
 
     async def run(self):
         """无参数运行模型/工具/审核/发布图，返回最终结果；整体轮次、工具次数、超时仍采用原运行预算。"""
         try:
-            state = await self.graph.ainvoke({'messages':[], 'turns':0, 'result':None,'revisions':0,'reviews':[],'review_status':''}, {'recursion_limit':36})
+            initial={'messages':[], 'turns':0, 'result':None,'revisions':0,'reviews':[],'review_status':'',
+                     'citations':[],'observations':[],'protocol':[],'web_output':None,'tool_index':0,'pending_action':None,'tools_route':'model'}
+            config={'configurable':{'thread_id':self.writer.run['run_id']},'recursion_limit':64}
+            resume=self.writer.run['state_json'].get('resume_action')
+            state = await self.graph.ainvoke(Command(resume=resume) if resume else initial,config)
+            if state.get('__interrupt__'):
+                await self.writer.suspend(state['pending_action'])
+                return None
         except NodeCancelledError as error:
             # LangGraph将节点主动取消包装为普通异常，恢复取消语义交给任务处理器区分本人停止/进程中断。
             raise asyncio.CancelledError() from error
-        return state['result']
+        return unpack_result(state['result'])

@@ -304,6 +304,27 @@ nav { display: grid; gap: 5px; }
 .message-markdown .task-list-item { list-style: none; }
 .message-markdown .task-list-item input { width: auto; margin-right: .5em; }
 .message-limit-note { font-size: 14px; color: var(--muted); margin: 12px 0 0; }
+/* 通用敏感动作确认在工具内部边界触发，完整载荷可滚动；关闭窗口不会替用户批准。 */
+.action-confirmation-entry { padding: 18px; margin: 12px 0; border: 1px solid #c9d5e8; border-radius: 8px; background: #f3f6fc; }
+.action-confirmation { width: min(760px,calc(100vw - 32px)); max-height: calc(100dvh - 40px); padding: 24px; border: 1px solid #c9d5e8; border-radius: 12px; color: #263244; overflow-y: auto; }
+.action-confirmation::backdrop { background: rgb(20 32 52 / 45%); }
+.action-confirmation header,.action-confirmation footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.action-confirmation h2 { margin: 0; font-size: 22px; }
+.action-confirmation h3 { font-size: 16px; margin: 20px 0 8px; }
+.action-confirmation pre { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; background: #edf3fa; border-radius: 6px; font-size: 14px; }
+.action-confirmation dt { font-weight: 700; margin-top: 10px; }
+.action-confirmation dd { margin: 4px 0 0; overflow-wrap: anywhere; }
+.action-confirmation button,.action-confirmation-entry button { min-height: 44px; padding: 8px 16px; border: 1px solid #b9c7dd; border-radius: 6px; background: white; cursor: pointer; }
+.action-confirmation .primary-action { background: var(--blue); color: white; }
+.action-confirmation footer { margin-top: 20px; justify-content: flex-end; }
+.business-table { overflow-x: auto; max-width: 100%; }
+.business-table table { border-collapse: collapse; width: 100%; font-size: 14px; }
+.business-table :is(th,td) { border: 1px solid #c9d5e8; padding: 8px 10px; white-space: nowrap; }
+.business-table th { background: #edf3fa; }
+.business-chart { margin: 18px 0; border: 1px solid #c9d5e8; border-radius: 6px; padding: 12px; }
+.business-chart svg { width: 100%; display: block; }
+.business-chart figcaption { font-weight: 700; }
+.business-chart p { font-size: 13px; }
 .chat-run-state { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 15px; padding: 10px 0; color: #415879; }
 .chat-run-state.failed, .chat-run-state.interrupted, .run-error { color: #a52a36; }
 .run-error { font-size: 15px; margin: 12px 0 0; }

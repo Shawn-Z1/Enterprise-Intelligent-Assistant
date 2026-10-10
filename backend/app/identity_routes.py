@@ -140,7 +140,7 @@ async def update_staff(user_id: ShortId,body: StaffUpdate,request: Request,conte
             version = await conn.fetchval("""UPDATE app_system.users SET department_id=$1,grade=$2,position=$3,
                 business_query_enabled=$4,knowledge_enabled=$5,permission_version=permission_version+1,updated_at=now()
                 WHERE user_id=$6 RETURNING permission_version""",body.department_id,body.grade,body.position,body.business_query_enabled,knowledge,user_id)
-            await conn.execute("UPDATE app_runtime.query_approvals SET decision='invalidated' WHERE user_id=$1 AND decision='pending'",user_id)
+            await conn.execute("UPDATE app_runtime.query_approvals SET decision='invalidated' WHERE user_id=$1 AND decision IN ('pending','approved')",user_id)
             await security_event(request,"identity.permissions_changed",{"target_user_id":str(user_id),
                 "before":{**dict(previous),"department_id":str(previous["department_id"]) if previous["department_id"] else None},"after":{"department_id":str(body.department_id) if body.department_id else None,
                 "grade":body.grade,"position":body.position,"business_query_enabled":body.business_query_enabled,
@@ -190,14 +190,14 @@ async def conversation(conversation_id: ShortId,request: Request,context: AuthCo
                 m.protocol_json->'message'->'citations' AS citations
                 FROM app_runtime.messages m LEFT JOIN app_runtime.runs r ON r.run_id=m.run_id
                 WHERE m.conversation_id=$1 AND m.user_id=$2 ORDER BY m.message_order""",conversation_id,context.user_id)
-            active = await conn.fetchrow("SELECT run_id,trace_id,status,created_at,updated_at FROM app_runtime.runs WHERE conversation_id=$1 AND user_id=$2 AND status IN ('pending','running') ORDER BY created_at DESC LIMIT 1",conversation_id,context.user_id)
+            active = await conn.fetchrow("SELECT run_id,trace_id,status,created_at,updated_at,state_json->>'pending_action' AS pending_action FROM app_runtime.runs WHERE conversation_id=$1 AND user_id=$2 AND status IN ('pending','running','waiting_confirmation') ORDER BY created_at DESC LIMIT 1",conversation_id,context.user_id)
             last_run = await conn.fetchrow("SELECT run_id,trace_id,conversation_id,status,created_at,updated_at,state_json->'error' AS error FROM app_runtime.runs WHERE conversation_id=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT 1",conversation_id,context.user_id)
             public_messages = []
             for message in messages:
                 value = dict(message)
                 # 原引用档案保留，但历史接口不重放受限正文；点击来源时重新请求当前鉴权接口。
                 value['citations'] = [{key:item.get(key) for key in ('type','label','chunk_id','document_id','filename','page','page_numbers','heading','heading_path','position',
-                    'source_id','title','url','website','published_at','fetched_at','content_kind','page_read','truncated')} for item in (value['citations'] or [])]
+                    'source_id','result_id','title','url','website','published_at','fetched_at','content_kind','page_read','truncated')} for item in (value['citations'] or [])]
                 public_messages.append(value)
             return {**dict(owned),"messages":public_messages,"active_run":dict(active) if active else None,"last_run":dict(last_run) if last_run else None}
     await security_event(request,"resources.access_rejected",{"resource":"conversation","resource_id":str(conversation_id)},context)

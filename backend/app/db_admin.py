@@ -114,7 +114,16 @@ async def grant_runtime_access(conn: asyncpg.Connection, settings: BootstrapSett
     await conn.execute(f"GRANT SELECT,INSERT ON ALL TABLES IN SCHEMA app_audit TO {app_role}")
     await conn.execute(f"GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA {app_schemas},app_audit TO {app_role}")
     await conn.execute(f"GRANT USAGE ON SCHEMA demo_business TO {reader}")
-    await conn.execute(f"GRANT SELECT ON demo_business.departments,demo_business.employees,demo_business.attendance_records,demo_business.approval_records,demo_business.tickets TO {reader}")
+    if await conn.fetchval("SELECT to_regclass('demo_business.visible_employees')"):
+        # 业务账号只读有能力及行范围保护的视图，不能绕过视图直接访问底表。
+        await conn.execute(f"REVOKE SELECT ON demo_business.departments,demo_business.employees,demo_business.attendance_records,demo_business.approval_records,demo_business.tickets FROM {reader}")
+        await conn.execute(f"GRANT SELECT ON demo_business.visible_departments,demo_business.visible_employees,demo_business.visible_attendance_records,demo_business.visible_approval_records,demo_business.visible_tickets TO {reader}")
+        await conn.execute(f"GRANT EXECUTE ON FUNCTION demo_business.authorized_query_scope() TO {reader}")
+        if await conn.fetchval("SELECT to_regclass('demo_business.visible_code_submissions')"):
+            await conn.execute(f"REVOKE ALL ON demo_business.code_submissions FROM {reader}")
+            await conn.execute(f"GRANT SELECT ON demo_business.visible_code_submissions TO {reader}")
+    else:
+        await conn.execute(f"GRANT SELECT ON demo_business.departments,demo_business.employees,demo_business.attendance_records,demo_business.approval_records,demo_business.tickets TO {reader}")
 
 
 async def migrate(conn: asyncpg.Connection, settings: BootstrapSettings) -> dict:

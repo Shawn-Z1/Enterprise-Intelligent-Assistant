@@ -31,4 +31,6 @@ async def connect_business(settings: Settings) -> asyncpg.Connection:
                                       password=settings.business_db_password.get_secret_value(),
                                       timeout=4, command_timeout=10)
     await configure_connection(connection)
+    # 生成SQL显式限定业务视图；函数解析只走pg_catalog，不能被public同名函数劫持。
+    await connection.execute('SET search_path = pg_catalog')
     return connection

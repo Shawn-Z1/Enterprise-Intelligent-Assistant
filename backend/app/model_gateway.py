@@ -101,6 +101,16 @@ class Circuit:
     probing: bool = False
 
 
+def pack_result(result: ModelResult) -> dict:
+    """接收网关结果，转换为检查点可保存的普通字段，usage保留实际来源，不序列化自定义执行对象。"""
+    return {**vars(result),'usage':result.usage.model_dump(mode='json')}
+
+
+def unpack_result(value: dict) -> ModelResult:
+    """接收可信检查点中的模型结果字典，还原网关结果供审核/发布，不接受浏览器提供的状态。"""
+    return ModelResult(**{**value,'usage':Usage(**value['usage'])})
+
+
 def estimate_tokens(value, model: str='') -> int:
     """接收消息/文本与型号，返回模型参考tokenizer预算；未知型号用字节上界，不表示供应商计费用量。"""
     return count_value(value,model).count

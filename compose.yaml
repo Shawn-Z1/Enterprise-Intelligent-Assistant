@@ -130,7 +130,7 @@ services:
 
   api:
     build: ./backend
-    image: zhixing-backend:0.6.1
+    image: zhixing-backend:0.7.0
     environment: *backend-env
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
@@ -144,7 +144,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: zhixing-backend:0.6.1
+    image: zhixing-backend:0.7.0
     build: ./backend
     command: ["python", "-m", "app.worker"]
     environment: *backend-env
@@ -160,7 +160,7 @@ services:
   # 显式管理任务：外置迁移和种子只读挂载，不在应用启动时自动导入。
   db-admin:
     profiles: ["tools"]
-    image: zhixing-backend:0.6.1
+    image: zhixing-backend:0.7.0
     build: ./backend
     entrypoint: ["python", "-m", "app.db_admin"]
     environment:

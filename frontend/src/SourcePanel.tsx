@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Download, X } from 'lucide-react';
 import { apiRequest, knowledgeBlob, citationPages, type Citation } from './api';
+import { BusinessResult } from './BusinessResult';
 
 interface Source extends Citation { content: string; file_format: string; filename: string; document_id: string; position: number; }
 interface Preview { format: string; page_count: number; pages?: {page:number;text:string}[]; blocks?: {type:string;text?:string;rows?:string[][]}[]; }
 
 /** 接收引用及关闭动作，在右侧真实定位当前授权来源；失效或撤权清空正文，移动屏采用覆盖面板。 */
 export function SourcePanel({citation,close}: {citation:Citation;close:()=>void}) {
-  return citation.type==='web' ? <WebSourcePanel citation={citation} close={close}/> : <KnowledgeSourcePanel citation={citation} close={close}/>;
+  return citation.type==='business' ? <BusinessResult resultId={citation.result_id!} close={close}/> : citation.type==='web' ? <WebSourcePanel citation={citation} close={close}/> : <KnowledgeSourcePanel citation={citation} close={close}/>;
 }
 
 /** 接收内部引用与关闭回调，复用原件预览；返回受当前知识权限约束的来源面板。 */

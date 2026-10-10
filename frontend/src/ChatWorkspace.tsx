@@ -3,9 +3,11 @@ import { ArrowUp, Check, MessageSquare, Pencil, Square, X } from 'lucide-react';
 import { apiRequest, beijingTime, requestId, citationPages, citationTitle, type ChatEvent, type ChatMessage, type ChatRun, type Conversation, type ConversationDetail, type Citation } from './api';
 import { SourcePanel } from './SourcePanel';
 import { MarkdownReply } from './MarkdownReply';
+import { ActionConfirmation } from './ActionConfirmation';
+import type { SensitiveAction } from './api';
 
 interface Props { conversationId: string | null; revision: number; userName: string; select: (id: string) => void; changed: () => Promise<void>; }
-const labels = {pending:'等待处理',running:'正在回答',completed:'回答完成',failed:'回答失败',cancelled:'已停止',interrupted:'执行中断'};
+const labels = {pending:'等待处理',running:'正在回答',waiting_confirmation:'等待人工确认',completed:'回答完成',failed:'回答失败',cancelled:'已停止',interrupted:'执行中断'};
 
 /** 接收本人所选会话与目录回调，渲染真实原消息、持久 SSE、停止和重命名，返回聊天工作区。 */
 export function ChatWorkspace({conversationId,revision,userName,select,changed}: Props) {
@@ -24,13 +26,14 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
   const [newTitle,setNewTitle] = useState('');
   const [renameBusy,setRenameBusy] = useState(false);
   const [citation,setCitation] = useState<Citation | null>(null);
+  const [action,setAction] = useState<SensitiveAction | null>(null);
   const closeSource=useCallback(()=>setCitation(null),[]);
   // 同一条未成功确认的发送重用标识，网络重传不能生成第二个模型任务。
   const pendingKey = useRef<{content: string; conversation: string | null; key: string} | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const viewport = useRef<HTMLDivElement>(null);
-  const busy = sending || run?.status==='pending' || run?.status==='running';
+  const busy = sending || run?.status==='pending' || run?.status==='running' || run?.status==='waiting_confirmation';
 
   /** 无参数从 PG 读取本人会话，返回资料，并同步原消息和当前任务，不信任浏览器历史内容。 */
   const refresh = useCallback(async () => {
@@ -42,7 +45,7 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
 
   useEffect(() => {
     let alive = true;
-    setError(''); setMessages([]); setRun(null); setLiveText(''); setEvents([]); setStage(''); setRenaming(false); setDraft(''); setLoading(false);setCitation(null);
+    setError(''); setMessages([]); setRun(null); setLiveText(''); setEvents([]); setStage(''); setRenaming(false); setDraft(''); setLoading(false);setCitation(null);setAction(null);
     pendingKey.current = null; pinned.current = true;
     if (!conversationId) { setTitle('新对话'); return; }
     setLoading(true);
@@ -57,7 +60,7 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
     if (!run) return;
     let closed = false;
     let lastSequence = 0;
-    const historical = !['pending','running'].includes(run.status);
+    const historical = !['pending','running','waiting_confirmation'].includes(run.status);
     // 原生 EventSource 自动携带 Cookie 并按 Last-Event-ID 重连；服务器只重放 PG 已保存的事件。
     const stream = new EventSource(`/api/runs/${run.run_id}/events`);
     stream.addEventListener('run.event',event => {
@@ -68,8 +71,16 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
       if (value.type==='assistant.reset') setLiveText('');
       if (value.type==='assistant.delta') setLiveText(current => current+(value.data.text || ''));
       if (value.data.message) setStage(value.data.message);
+      if(value.type==='confirmation.required' && value.data.action && !historical){
+        // SSE可能重放旧确认事件，先读取当前动作状态，不能把已同意/拒绝动作重新显示为待确认。
+        void apiRequest<SensitiveAction>(`/actions/${value.data.action.action_id}`).then(currentAction=>{
+          if(!closed && currentAction.status==='pending'){setAction(currentAction);setRun(current=>current ? {...current,status:'waiting_confirmation',pending_action:currentAction.action_id} : current);}
+        }).catch(reason=>{if(!closed)setError(reason.message);});
+      }
+      if(value.type==='confirmation.decided' && !historical){setAction(null);setRun(current=>current ? {...current,status:'pending'} : current);}
       if (value.type==='run.started' && !historical) setRun(current => current ? {...current,status:'running'} : current);
-      if (value.type.startsWith('run.') && value.data.status && !['pending','running'].includes(value.data.status)) {
+      if (value.type.startsWith('run.') && value.data.status && !['pending','running','waiting_confirmation'].includes(value.data.status)) {
+        setAction(null);
         setRun(current => current ? {...current,status:value.data.status!,error:value.data.error} : current);
         setStopping(false); closed = true; stream.close();
         if (value.data.status==='completed') setStage('回答完成');
@@ -85,6 +96,13 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
     stream.onerror = () => { if (!closed) setStage('连接暂时中断，正在恢复已保存的回答…'); };
     return () => { closed = true; stream.close(); };
   },[run?.run_id,refresh,changed]);
+
+  useEffect(()=>{
+    let alive=true;
+    if(run?.status==='waiting_confirmation' && run.pending_action)
+      apiRequest<SensitiveAction>(`/actions/${run.pending_action}`).then(value=>{if(alive && value.status==='pending')setAction(value);}).catch(reason=>{if(alive)setError(reason.message);});
+    return()=>{alive=false;};
+  },[run?.status,run?.pending_action]);
 
   useEffect(() => {
     if (pinned.current) bottom.current?.scrollIntoView({block:'end',behavior:'auto'});
@@ -154,6 +172,7 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
       {liveText && run?.status!=='completed' && <article className="chat-message assistant live-reply"><div className="message-meta"><strong>知行</strong><span>{busy ? '正在回答' : '未完成的回答'}</span></div><MarkdownReply content={liveText}/></article>}
       {run && <div className={`chat-run-state ${run.status}`} role="status"><span className={busy || run.status==='completed' ? 'status-dot healthy' : 'status-dot'} />{busy ? stage || labels[run.status] : labels[run.status]}{run.error && <span>{run.error.message}</span>}</div>}
       {events.length>0 && <details className="chat-execution"><summary>查看本次执行记录</summary><ol>{events.filter(item=>item.type!=='assistant.delta' && item.type!=='assistant.reset').map(item=><li key={item.sequence}><time>{beijingTime(item.timestamp)}</time><span>{item.data.message || (item.type==='model.attempt_failed' ? '模型调用失败' : item.type==='run.queued' ? '等待处理' : item.type==='run.started' ? '开始处理' : item.type==='run.completed' ? '回答完成' : item.type==='run.cancelled' ? '已停止' : item.type)}</span></li>)}</ol></details>}
+      {action?.status==='pending' && <ActionConfirmation action={action} decided={()=>{setAction(null);void refresh();}}/>}
       <div ref={bottom} />
     </div>
     <form className="chat-composer-area" onSubmit={send}>
@@ -162,5 +181,5 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
         <div><span>Enter 发送，Shift+Enter 换行</span>{busy ? <button type="button" aria-label="停止回答" disabled={stopping || sending} onClick={() => void stop()}><Square size={18} /></button> : <button aria-label="发送消息" disabled={!draft.trim() || loading || sending}><ArrowUp size={20} /></button>}</div>
       </div>
     </form>
-  </div>{citation && <SourcePanel key={citation.chunk_id} citation={citation} close={closeSource}/>}</div>;
+  </div>{citation && <SourcePanel key={citation.result_id || citation.source_id || citation.chunk_id} citation={citation} close={closeSource}/>}</div>;
 }

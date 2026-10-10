@@ -79,7 +79,7 @@ async def send_message(conversation_id: ShortId,body: MessageBody,request: Reque
                 if previous['state_json'].get('request_fingerprint')!=fingerprint:
                     raise auth_error(409,'REQUEST_KEY_REUSED','发送标识已用于其他消息，请重新发送')
                 return public_run(dict(previous))
-            if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM app_runtime.runs WHERE conversation_id=$1 AND status IN ('pending','running'))",conversation_id):
+            if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM app_runtime.runs WHERE conversation_id=$1 AND status IN ('pending','running','waiting_confirmation'))",conversation_id):
                 raise auth_error(409,'CONVERSATION_BUSY','这段会话正在生成回答，请等待结束或停止后再发送')
             run_id,message_id = new_id(),new_id()
             rows = [dict(row) for row in await conn.fetch('SELECT * FROM app_runtime.messages WHERE conversation_id=$1 AND user_id=$2 ORDER BY message_order',conversation_id,context.user_id)]
@@ -128,7 +128,9 @@ async def cancel_run(run_id: ShortId,request: Request,context: AuthContext=Depen
                 return public_run(dict(row))
             await conn.execute('UPDATE app_runtime.runs SET cancel_requested=true,updated_at=now() WHERE run_id=$1',run_id)
             await security_event(request,'chat.cancel_requested',{'run_id':run_id},context,conn)
-    if row['status']=='pending':
+    if row['status'] in ('pending','waiting_confirmation'):
+        async with request.app.state.pool.acquire() as conn:
+            await conn.execute("UPDATE app_runtime.query_approvals SET decision='cancelled',execution_token_hash=NULL WHERE run_id=$1 AND decision IN ('pending','approved')",run_id)
         await RunWriter(request.app.state.pool,request.app.state.audit,run).finish('cancelled',{'code':'RUN_CANCELLED','message':'本次回答已停止'})
     return {'cancel_requested':True}
 

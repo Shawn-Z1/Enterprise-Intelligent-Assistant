@@ -20,6 +20,7 @@ from app.knowledge_storage import KnowledgeStorage
 from app.rag_index import RagIndex
 from app.rag_service import RagService
 from app.web_routes import router as web_router
+from app.action_routes import router as action_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logging.getLogger('httpx').setLevel(logging.WARNING)
@@ -44,20 +45,21 @@ async def lifespan(app: FastAPI):
     app.state.rag = RagService(app.state.pool,app.state.settings,app.state.rag_index,app.state.knowledge_storage,app.state.audit)
     try:
         trace_id = new_id()
-        await app.state.audit.append(trace_id, "service.started", {"service": "api", "milestone": "M06A"})
-        app.state.events.record(trace_id, "service.started", {"service": "api", "milestone": "M06A"})
+        await app.state.audit.append(trace_id, "service.started", {"service": "api", "milestone": "M07"})
+        app.state.events.record(trace_id, "service.started", {"service": "api", "milestone": "M07"})
         yield
     finally:
         await app.state.rag_index.close()
         await app.state.pool.close()
 
 
-app = FastAPI(title="知行企业智能助理", version="0.6.1", lifespan=lifespan,
+app = FastAPI(title="知行企业智能助理", version="0.7.0", lifespan=lifespan,
               docs_url="/api/docs", openapi_url="/api/openapi.json", redoc_url=None)
 app.include_router(identity_router)
 app.include_router(chat_router)
 app.include_router(knowledge_router)
 app.include_router(web_router)
+app.include_router(action_router)
 
 
 @app.middleware("http")
