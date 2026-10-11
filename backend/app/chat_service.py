@@ -126,6 +126,8 @@ class ChatProcessor:
         self.rag = rag
         self.web = web
         self.hook=HumanSecondaryConfirmationHook(pool,audit)
+        from app.sandbox_service import SandboxService
+        self.sandbox=SandboxService(pool,settings,audit,self.hook) if settings.sandbox_enabled else None
         self.business=BusinessSqlService(pool,settings,gateway,audit,self.hook)
 
     async def claim(self) -> dict | None:

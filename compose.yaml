@@ -1,6 +1,9 @@
 name: zhixing
 
 x-backend-env: &backend-env
+  SANDBOX_ENABLED: ${SANDBOX_ENABLED:-false}
+  SANDBOX_RUNNER_URL: ${SANDBOX_RUNNER_URL:-http://sandbox-runner:8091}
+  SANDBOX_CONTROL_TOKEN: ${SANDBOX_CONTROL_TOKEN:-}
   TZ: Asia/Shanghai
   POSTGRES_HOST: postgres
   POSTGRES_PORT: "5432"
@@ -74,6 +77,34 @@ x-app-dependencies: &app-dependencies
     condition: service_healthy
 
 services:
+  # 仅用于构建预备分析镜像，不是共享执行实例；真实任务由控制器逐次创建。
+  sandbox-image:
+    profiles: [tools]
+    image: zhixing-sandbox-guest:0.7.1
+    build:
+      context: ./services/sandbox-runner
+      dockerfile: guest.Dockerfile
+    entrypoint: ["true"]
+  sandbox-runner:
+    image: zhixing-sandbox-runner:0.7.1
+    build: ./services/sandbox-runner
+    environment:
+      SANDBOX_CONTROL_TOKEN: ${SANDBOX_CONTROL_TOKEN:?请初始化沙箱控制密钥}
+      SANDBOX_TASK_IMAGE: zhixing-sandbox-guest:0.7.1
+      SANDBOX_INPUT_VOLUME: zhixing-sandbox-inputs
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sandbox-state:/var/lib/sandbox
+      - sandbox-inputs:/var/lib/sandbox-inputs
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request,os; r=urllib.request.Request('http://localhost:8091/health',headers={'Authorization':'Bearer '+os.environ['SANDBOX_CONTROL_TOKEN']}); urllib.request.urlopen(r,timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
   # 一次性下载固定模型到持久权重卷；文件哈希一致时不会重复下载。
   models-init:
     image: zhixing-retrieval-models:0.6.1
@@ -130,7 +161,7 @@ services:
 
   api:
     build: ./backend
-    image: zhixing-backend:0.7.0
+    image: zhixing-backend:0.7.1
     environment: *backend-env
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
@@ -144,7 +175,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: zhixing-backend:0.7.0
+    image: zhixing-backend:0.7.1
     build: ./backend
     command: ["python", "-m", "app.worker"]
     environment: *backend-env
@@ -160,10 +191,13 @@ services:
   # 显式管理任务：外置迁移和种子只读挂载，不在应用启动时自动导入。
   db-admin:
     profiles: ["tools"]
-    image: zhixing-backend:0.7.0
+    image: zhixing-backend:0.7.1
     build: ./backend
     entrypoint: ["python", "-m", "app.db_admin"]
     environment:
+      SANDBOX_ENABLED: ${SANDBOX_ENABLED:-false}
+      SANDBOX_RUNNER_URL: ${SANDBOX_RUNNER_URL:-http://sandbox-runner:8091}
+      SANDBOX_CONTROL_TOKEN: ${SANDBOX_CONTROL_TOKEN:-}
       TZ: Asia/Shanghai
       POSTGRES_HOST: postgres
       POSTGRES_DB: ${POSTGRES_DB}
@@ -265,6 +299,9 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     command: ["minio", "server", "/data", "--console-address", ":9001"]
+    # 管理控制台仅供本机浏览；S3 数据接口仍只在容器内部网络提供。
+    ports:
+      - "127.0.0.1:9001:9001"
     volumes:
       - minio-data:/data
     healthcheck:
@@ -327,6 +364,9 @@ networks:
     name: zhixing-network
 
 volumes:
+  sandbox-state:
+  sandbox-inputs:
+    name: zhixing-sandbox-inputs
   retrieval-model-cache:
   postgres-data:
   redis-data:

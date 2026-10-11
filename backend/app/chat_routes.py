@@ -31,6 +31,7 @@ class ConversationBody(StrictBody):
 
 class MessageBody(StrictBody):
     content: str = Field(min_length=1,max_length=16000)
+    attachment_ids: list[ShortId] = Field(default_factory=list,max_length=10)
     request_key: ShortId
 
     @field_validator('content')
@@ -68,7 +69,7 @@ async def rename_conversation(conversation_id: ShortId,body: ConversationBody,re
 async def send_message(conversation_id: ShortId,body: MessageBody,request: Request,context: AuthContext=Depends(mutation_context)):
     """接收本人会话、文字及幂等键，预检上下文并原子保存用户原文与待执行任务；不在 HTTP 请求中调用模型。"""
     pool,settings = request.app.state.pool,request.app.state.settings
-    fingerprint = hashlib.sha256((conversation_id+'\0'+body.content).encode()).hexdigest()
+    fingerprint = hashlib.sha256((conversation_id+'\0'+body.content+('\0'+json.dumps(body.attachment_ids) if body.attachment_ids else '')).encode()).hexdigest()
     async with pool.acquire() as conn:
         async with conn.transaction():
             owned = await conn.fetchrow('SELECT c.title FROM app_runtime.conversations c JOIN app_system.users u USING(user_id) WHERE conversation_id=$1 AND c.user_id=$2 AND u.status=\'active\' FOR UPDATE OF c',conversation_id,context.user_id)
@@ -81,6 +82,9 @@ async def send_message(conversation_id: ShortId,body: MessageBody,request: Reque
                 return public_run(dict(previous))
             if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM app_runtime.runs WHERE conversation_id=$1 AND status IN ('pending','running','waiting_confirmation'))",conversation_id):
                 raise auth_error(409,'CONVERSATION_BUSY','这段会话正在生成回答，请等待结束或停止后再发送')
+            if body.attachment_ids:
+                count=await conn.fetchval('SELECT count(*) FROM app_runtime.analysis_attachments WHERE attachment_id=ANY($1::varchar[]) AND user_id=$2 AND conversation_id=$3',body.attachment_ids,context.user_id,conversation_id)
+                if count!=len(body.attachment_ids):raise auth_error(404,'ATTACHMENT_NOT_FOUND','附件不可访问或不属于当前会话')
             run_id,message_id = new_id(),new_id()
             rows = [dict(row) for row in await conn.fetch('SELECT * FROM app_runtime.messages WHERE conversation_id=$1 AND user_id=$2 ORDER BY message_order',conversation_id,context.user_id)]
             rows.append({'role':'user','content':body.content,'run_id':run_id,'protocol_json':{}})
@@ -91,7 +95,7 @@ async def send_message(conversation_id: ShortId,body: MessageBody,request: Reque
                 raise auth_error(413,error.code,error.message)
             run = dict(await conn.fetchrow('''INSERT INTO app_runtime.runs(run_id,trace_id,conversation_id,user_id,request_key,state_json)
                 VALUES($1,$2,$3,$4,$5,$6) RETURNING *''',run_id,request.state.trace_id,conversation_id,context.user_id,body.request_key,
-                {'request_fingerprint':fingerprint,'user_message_id':message_id,'auth_session_id':context.session_id}))
+                {'request_fingerprint':fingerprint,'user_message_id':message_id,'auth_session_id':context.session_id,'attachment_ids':body.attachment_ids}))
             await conn.execute('INSERT INTO app_runtime.messages(message_id,conversation_id,user_id,role,content,run_id) VALUES($1,$2,$3,\'user\',$4,$5)',message_id,conversation_id,context.user_id,body.content,run_id)
             title = ' '.join(body.content.split())[:36] if owned['title']=='新对话' else owned['title']
             await conn.execute('UPDATE app_runtime.conversations SET title=$1,updated_at=now() WHERE conversation_id=$2',title,conversation_id)

@@ -204,7 +204,7 @@ export default function App() {
           : <section className="module-placeholder"><span className="welcome-symbol">{page === 'automation' ? <Workflow size={26} /> : <UserRound size={26} />}</span><h1>{pages[page]}</h1>
             <p>{page === 'automation' ? '自动化任务流将在后续版本开放。' : '永久审计已保存，管理员只读查询页面将在后续开放。'}</p>
             <span className="placeholder-tag"><Check size={14} />入口已预留，功能尚未开放</span></section>}
-      </main><footer className="workspace-footer"><span>{authError || '当前仅支持文字对话，回答可能有误，重要结论请核实。'}</span><button onClick={() => void openStatus()}><Activity size={18} />运行状态</button></footer>
+      </main><footer className="workspace-footer"><span>{authError || '支持文字对话与CSV/XLSX文件分析；执行代码前需确认，重要结论请核实。'}</span><button onClick={() => void openStatus()}><Activity size={18} />运行状态</button></footer>
     </div>{statusPanel}
   </div>;
 }

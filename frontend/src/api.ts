@@ -41,7 +41,7 @@ export interface ChatMessage {
   usage?: {source: 'reported' | 'estimated' | 'unavailable'; total_tokens: number | null} | null; finish_reason?: string | null;
   citations?: Citation[];
 }
-export interface Citation { type?: 'knowledge' | 'web' | 'business'; result_id?: string; label: string; chunk_id?: string; document_id?: string; filename?: string; page?: number | null; heading?: string | null; position?: number;
+export interface Citation { type?: 'knowledge' | 'web' | 'business' | 'sandbox'; result_id?: string; label: string; chunk_id?: string; document_id?: string; filename?: string; page?: number | null; heading?: string | null; position?: number;
   source_id?: string; title?: string; url?: string; website?: string; published_at?: string | null; fetched_at?: string;
   content_kind?: 'search_snippet' | 'provider_excerpt' | 'page_text'; page_read?: boolean; truncated?: boolean;
   page_numbers?: number[] | null; heading_path?: {level:number;title:string}[] | null; }
@@ -56,7 +56,7 @@ export function citationPages(source: Citation): string {
 
 /** 接收内部或公开引用，返回可读来源标签；不将网页标题冒充内部文件名。 */
 export function citationTitle(source: Citation): string {
-  return source.type==='business' ? '业务 · 查询结果' : source.type==='web' ? `公开 · ${source.title || source.website || '网页'}` : `内部 · ${source.filename || '知识文档'}`;
+  return source.type==='sandbox' ? `文件 · ${source.title || '分析结果'}` : source.type==='business' ? '业务 · 查询结果' : source.type==='web' ? `公开 · ${source.title || source.website || '网页'}` : `内部 · ${source.filename || '知识文档'}`;
 }
 export interface ConversationDetail { conversation_id: string; title: string; messages: ChatMessage[]; active_run: ChatRun | null; last_run: ChatRun | null; }
 export interface ChatEvent { sequence: number; run_id: string; trace_id: string; timestamp: string; type: string; data: {text?: string; message?: string; model?: string; slot?: string; attempt?: number; next_attempt?: number; status?: ChatRun['status']; error?: ChatRun['error']; action?: SensitiveAction}; }
@@ -127,4 +127,13 @@ export async function fetchEvents(): Promise<RunEvent[]> {
   if (!response.ok) throw new Error('无法读取基础设施事件');
   const result = await response.json() as { events: RunEvent[] };
   return result.events;
+}
+
+export interface AnalysisAttachment {attachment_id:string;filename:string;format:string;size_bytes:number;original_sha256:string;}
+export interface SandboxResultData {result_id:string;description?:string;message?:string;columns?:string[];rows?:Record<string,unknown>[];row_count?:number;truncated?:boolean;chart?:{title?:string;partial?:boolean};files?:{attachment_id:string;file:string;sheet:string;table:string;columns:string[];row_count:number;missing:Record<string,number>;sample:Record<string,unknown>[]}[];artifacts:{artifact_id:string;filename:string;size_bytes:number;sha256:string}[];}
+/** 接收本人会话编号及文件表单，发送原件和会话CSRF，不覆盖浏览器multipart边界。 */
+export async function uploadAnalysis(conversationId:string,form:FormData):Promise<AnalysisAttachment[]>{
+  const csrf=document.cookie.split('; ').find(item=>item.startsWith('zhixing_csrf='))?.split('=').slice(1).join('=') || '';
+  const response=await fetch(`/api/conversations/${conversationId}/attachments`,{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':decodeURIComponent(csrf)},body:form});
+  const value=await response.json();if(!response.ok)throw new Error(value.error?.message || '上传失败');return value;
 }

@@ -15,12 +15,15 @@ export function ActionConfirmation({action,decided}:{action:SensitiveAction;deci
     finally{setBusy(false);}
   }
   const query=action.action_type==='business.query';
+  const sandbox=action.action_type==='sandbox.execute';
+  const files=(action.request.target.files || []) as {filename:string;original_sha256:string}[];
+  const policy=(action.request.target.policy || {}) as {cpu?:number;memory_mib?:number;seconds?:number};
   return <div className="action-confirmation-entry"><p>敏感操作尚未执行，需要你确认。</p><button type="button" onClick={()=>dialog.current?.showModal()}>查看待确认动作</button>
     <dialog ref={dialog} className="action-confirmation" aria-labelledby={`action-title-${action.action_id}`}>
       <header><h2 id={`action-title-${action.action_id}`}>人工二次确认</h2><button type="button" disabled={busy} aria-label="关闭确认窗口" onClick={()=>dialog.current?.close()}>关闭</button></header>
       <p>{action.request.purpose}</p>
-      {query ? <dl><dt>数据库 / Schema</dt><dd>{String(action.request.target.database)} / {String(action.request.target.schema)}</dd><dt>查询对象</dt><dd>{(action.request.target.tables as string[]).join('、')}</dd><dt>读取权限上限（实际筛选见下方SQL）</dt><dd>{String(action.request.target.scope)}</dd></dl> : <><h3>操作目标</h3><pre>{JSON.stringify(action.request.target,null,2)}</pre></>}
-      <h3>{query ? '完整 SQL' : '完整待执行内容'}</h3><pre>{query ? String(action.request.payload.sql) : JSON.stringify(action.request.payload,null,2)}</pre>
+      {query ? <dl><dt>数据库 / Schema</dt><dd>{String(action.request.target.database)} / {String(action.request.target.schema)}</dd><dt>查询对象</dt><dd>{(action.request.target.tables as string[]).join('、')}</dd><dt>读取权限上限（实际筛选见下方SQL）</dt><dd>{String(action.request.target.scope)}</dd></dl> : sandbox ? <><h3>本次输入文件</h3>{files.length ? files.map(file=><p key={file.original_sha256}>{file.filename}<br/><small>SHA-256：{file.original_sha256}</small></p>) : <p>无附件，仅执行本次代码。</p>}<p>语言：{String(action.request.payload.language)} · 最多{policy.seconds}秒 · {policy.cpu} CPU / {policy.memory_mib} MiB</p><p>断网、只读输入、无应用凭证；完成后销毁本次容器。</p></> : <><h3>操作目标</h3><pre>{JSON.stringify(action.request.target,null,2)}</pre></>}
+      <h3>{query ? '完整 SQL' : sandbox ? '完整待执行代码' : '完整待执行内容'}</h3><pre>{query ? String(action.request.payload.sql) : sandbox ? String(action.request.payload.code) : JSON.stringify(action.request.payload,null,2)}</pre>
       {query && <><h3>绑定参数</h3><pre>{JSON.stringify(action.request.payload.params,null,2)}</pre></>}
       <p>有效至 {beijingTime(action.expires_at)}。只允许本次操作；关闭窗口不会执行。</p>
       {error && <p className="error-text" role="alert">{error}</p>}

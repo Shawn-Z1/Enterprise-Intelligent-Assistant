@@ -41,6 +41,7 @@ REVIEW_INSTRUCTIONS = """你是独立的企业智能助理答案审核员。只�
 检查每个实质问题，指出具体原句或步骤、对应记录和可执行建议。不能凭你的记忆补充资料、断言没执行的工具一定能成功；无权限不能要求越权，安全拒绝不能要求绕过。任务无结果/服务失败/资料冲突时诚实说明限制也可以通过，不为措辞喜好或无必要的检索驳回。
 当前可用工具见available_tools。审核建议不能把内部知识/历史内容变成公开关键词；公开搜索始终仅从用户本次公开任务生成，同run重复搜索只复用已保存快照，不能建议换主模型query以重复外发。
 业务结果scope表示可读权限上限，不表示本次返回全表；必须结合executed_query或action_request中的冻结SQL/参数核对筛选条件。returned_numeric_totals是后端计算的返回行数值合计，答案声称这些行的合计时必须一致；截断结果不能称全量合计。WHERE筛选本人后的真实结果可以回答本人统计，不能因权限可读全表而误称部门全量或声称不能查询本人。
+文件分析事实需要run_sandbox_code真实执行回执；inspect仅提供表结构和样例，不能冒充全量统计或代码执行。execute须真实批准后运行，依据回执核对文件/工作表/行数/缺失值口径，样例/截断必须说明。下载和图表仅引用当前实际生成产物，失败不能称成功。
 只输出一个JSON对象，不输出Markdown或思考。格式：{"verdict":"approve|revise|insufficient","issues":[{"aspect":"task_completion|execution_truth|evidence_consistency|repair_feasibility","target":"原句或步骤","basis":"实际记录或证据","suggestion":"修正建议"}]}。
 approve的issues必须为空；revise表示有具体可行的修正路径；insufficient表示仍无足够证据且不能合理继续，应交付已确认资料和限制，issues必须非空。后端事实检查错误不能通过。
 """
@@ -48,7 +49,7 @@ approve的issues必须为空；revise表示有具体可行的修正路径；insu
 
 def source_key(citation: dict) -> tuple:
     """接收引用，返回与当前执行去重一致的来源标识；不把网页新快照误算作新来源。"""
-    if citation.get('type')=='business':return ('business',citation.get('result_id'))
+    if citation.get('type') in ('business','sandbox'):return (citation['type'],citation.get('result_id'))
     return ('web',citation.get('url')) if citation.get('type')=='web' else ('knowledge',citation.get('chunk_id'))
 
 

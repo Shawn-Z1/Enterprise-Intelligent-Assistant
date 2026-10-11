@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { ArrowUp, Check, MessageSquare, Pencil, Square, X } from 'lucide-react';
 import { apiRequest, beijingTime, requestId, citationPages, citationTitle, type ChatEvent, type ChatMessage, type ChatRun, type Conversation, type ConversationDetail, type Citation } from './api';
+import { AnalysisAttachments } from './AnalysisAttachments';
 import { SourcePanel } from './SourcePanel';
 import { MarkdownReply } from './MarkdownReply';
 import { ActionConfirmation } from './ActionConfirmation';
@@ -11,6 +12,9 @@ const labels = {pending:'等待处理',running:'正在回答',waiting_confirmati
 
 /** 接收本人所选会话与目录回调，渲染真实原消息、持久 SSE、停止和重命名，返回聊天工作区。 */
 export function ChatWorkspace({conversationId,revision,userName,select,changed}: Props) {
+  // 附件编号仅描述本次输入，真实所有权由服务端验证。
+  const [uploadBusy,setUploadBusy]=useState(false);
+  const [attachmentIds,setAttachmentIds]=useState<string[]>([]);
   const [messages,setMessages] = useState<ChatMessage[]>([]);
   const [title,setTitle] = useState('新对话');
   const [draft,setDraft] = useState('');
@@ -29,7 +33,7 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
   const [action,setAction] = useState<SensitiveAction | null>(null);
   const closeSource=useCallback(()=>setCitation(null),[]);
   // 同一条未成功确认的发送重用标识，网络重传不能生成第二个模型任务。
-  const pendingKey = useRef<{content: string; conversation: string | null; key: string} | null>(null);
+  const pendingKey = useRef<{content: string; conversation: string | null; attachments:string; key: string} | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const viewport = useRef<HTMLDivElement>(null);
@@ -112,10 +116,11 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
   async function send(event: FormEvent) {
     event.preventDefault();
     const content = draft.trim();
-    if (!content || busy) return;
+    if (!content || busy || uploadBusy) return;
+    const attachmentSignature=JSON.stringify(attachmentIds);
     setSending(true); setError(''); setLiveText(''); setEvents([]); pinned.current = true;
-    if (!pendingKey.current || pendingKey.current.content!==content || (conversationId!==null && pendingKey.current.conversation!==conversationId))
-      pendingKey.current = {content,conversation:conversationId,key:requestId()};
+    if (!pendingKey.current || pendingKey.current.content!==content || pendingKey.current.attachments!==attachmentSignature || (conversationId!==null && pendingKey.current.conversation!==conversationId))
+      pendingKey.current = {content,conversation:conversationId,attachments:attachmentSignature,key:requestId()};
     try {
       let id = conversationId || pendingKey.current.conversation;
       if (!id) {
@@ -124,7 +129,7 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
         // 创建成功后保留 ID，发送确认丢失时重传同一会话，避免多次创建。
         pendingKey.current.conversation = id;
       }
-      const next = await apiRequest<ChatRun>(`/conversations/${id}/messages`,'POST',{content,request_key:pendingKey.current.key});
+      const next = await apiRequest<ChatRun>(`/conversations/${id}/messages`,'POST',{content,request_key:pendingKey.current.key,attachment_ids:attachmentIds});
       setDraft(''); pendingKey.current = null; setRun(next); setStage('消息已保存，等待处理');
       if (id!==conversationId) select(id);
       else await refresh();
@@ -175,7 +180,7 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
       {action?.status==='pending' && <ActionConfirmation action={action} decided={()=>{setAction(null);void refresh();}}/>}
       <div ref={bottom} />
     </div>
-    <form className="chat-composer-area" onSubmit={send}>
+    <AnalysisAttachments conversationId={conversationId} disabled={busy || loading} select={select} changed={changed} selected={setAttachmentIds} uploading={setUploadBusy}/><form className="chat-composer-area" onSubmit={send}>
       {error && <p className="error-text" role="alert">{error}</p>}
       <div className="composer"><label className="sr-only" htmlFor="message">消息</label><textarea id="message" placeholder="向知行提问，或粘贴需要讨论的文字…" disabled={loading || sending} maxLength={16000} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={onKey} />
         <div><span>Enter 发送，Shift+Enter 换行</span>{busy ? <button type="button" aria-label="停止回答" disabled={stopping || sending} onClick={() => void stop()}><Square size={18} /></button> : <button aria-label="发送消息" disabled={!draft.trim() || loading || sending}><ArrowUp size={20} /></button>}</div>

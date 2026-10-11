@@ -436,3 +436,16 @@ nav { display: grid; gap: 5px; }
   .chat-composer-area .composer { padding: 14px; }
   .chat-composer-area .composer>div>span { font-size: 14px; }
 }
+
+/* 会话文件复用工作区样式，原件选择与执行确认各自明确。 */
+.analysis-attachments{padding:10px 20px;border-top:1px solid #e4e9f2;display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:13px;max-height:150px;overflow:auto}
+.analysis-upload{display:inline-flex;align-items:center;border:1px solid #cbd5e5;border-radius:7px;min-height:36px;padding:5px 10px;cursor:pointer}
+.analysis-upload input{max-width:210px;margin-left:8px}
+.analysis-file-list{display:flex;flex-wrap:wrap;gap:8px;width:100%}
+.analysis-file-list label{display:flex;align-items:center;gap:5px;background:#f2f5fb;padding:5px 8px;border-radius:5px;max-width:100%}
+.analysis-file-list span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px}
+.sandbox-chart-image{width:100%;height:auto;margin:12px 0;border:1px solid #d7dfed;border-radius:6px}
+@media(max-width:640px){.analysis-attachments{padding:8px 12px}.analysis-upload{min-height:44px}.analysis-file-list label{min-height:36px}}
+
+.action-confirmation footer{position:sticky;bottom:-24px;background:white;padding:12px 0;border-top:1px solid #dce3ee}
+.action-confirmation small{overflow-wrap:anywhere}

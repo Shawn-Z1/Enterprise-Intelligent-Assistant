@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     dependency_timeout_seconds: float = Field(default=4, ge=1, le=30)
     worker_interval_seconds: int = Field(default=10, ge=1, le=60)
     worker_stale_seconds: int = Field(default=35, ge=5, le=180)
+    # 控制密钥仅供应用访问专用服务，执行客体不继承凭证。
+    sandbox_enabled: bool = False
+    sandbox_runner_url: str = "http://sandbox-runner:8091"
+    sandbox_control_token: SecretStr = SecretStr("")
     worker_state_path: str = "/tmp/zhixing-worker-health.json"
     session_hours: int = Field(default=24,ge=1,le=168)
     session_cookie_secure: bool = False

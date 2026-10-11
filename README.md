@@ -1,6 +1,8 @@
 # 知行 · 企业智能助理
 
-面向企业员工的浏览器工作台，用于集中处理企业知识、业务数据和工作记录。当前M07版本支持真实账号、职员权限管理、主备模型对话、独立模型答案审核、知识提交与审核、完整混合检索、公开搜索、敏感动作人工二次确认、受限Text to SQL及真实结果表格/图表、来源预览和永久审计。
+面向企业员工的浏览器工作台，用于集中处理企业知识、业务数据和工作记录。当前M07A版本支持CSV/XLSX沙箱文件分析、真实账号、职员权限管理、主备模型对话、独立模型答案审核、知识提交与审核、完整混合检索、公开搜索、敏感动作人工二次确认、受限Text to SQL及真实结果表格/图表、来源预览和永久审计。
+
+2026-10-11 已调整后续设计：取消对话转知识和专用会议纪要工具，新增通用附件预处理/详细读取、自动通用沙箱执行、持久排队及多实例扩容。当前代码仍是上述 M07A 行为，尚未实现这些新能力；本轮配置变更仅开放本机 MinIO 管理端口。
 
 ## 当前功能
 
@@ -306,13 +308,48 @@ docker compose up -d --wait --wait-timeout 300
 
 PostgreSQL、Redis、etcd、MinIO 和 Milvus 使用独立命名卷。需要保留数据时，不使用 `docker compose down -v`。
 
+## 本机查看 MinIO 文件
+
+Compose 将 MinIO Console 映射为 http://127.0.0.1:9001，仅本机可访问；9000 S3 数据接口仍位于容器内部网络。修改配置后运行 `docker compose up -d --no-deps minio` 应用映射，不重建镜像、不删除数据卷。
+
+使用 `.env` 的 `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` 登录，在 Object Browser 浏览存储桶。应用桶由 `APP_MINIO_BUCKET` 指定，默认 `application-files`：`knowledge/` 保存知识原件，`analysis/` 保存会话附件，`sandbox/` 保存已生成产物。对象可能以编号命名，原始文件名/对象键对应关系见 PG 的附件/产物元数据，下载后按原格式打开；MinIO 不是可直接按 SQL 查看行列的数据库。Milvus 的内部存储桶保持独立。
+
+## M07A 文件分析与部署（当前旧实现）
+
+会话可上传CSV/XLSX并选择本次附件。模型先调用run_sandbox_code.inspect，在独立任务容器内检查完整文件，再生成Python或DuckDB文件SQL。每次execute展示文件/SHA、完整代码和固定资源策略，经本人二次确认后执行，修改代码重新确认。同一run最多3次代码执行，等待释放worker槽。结果来源面板展示真实表格/静态PNG和CSV下载，检查样例不是全量统计。
+
+分析镜像预装依赖；每次inspect/execute创建新的普通Docker容器，非root、只读根目录/本任务输入、断网、cap-drop=ALL、默认seccomp及no-new-privileges；2CPU/1GiB/64进程、60秒、临时输出256MiB、stdout/stderr64KiB、产物20MiB。完成/失败/取消均销毁实例及临时输入，原附件和已保存产物保留。全局2/每用户1并发，镜像/服务不可用明确拒绝，不在API/worker执行代码。控制器重启清理本项目孤儿任务，未知结果不自动重跑。
+
+控制器是可信容器管理组件，只有它挂载Docker socket；这赋予它管理Docker的权限，不是普通用户或模型的能力。API/worker/任务容器无socket。控制接口仅内部网络、独立随机令牌，不暴露端口；不能接受模型指定镜像、宿主路径或容器参数。普通容器仍共享宿主内核，这不是针对任意恶意代码的强隔离保证。
+
+Linux服务器首次部署（宿主只需Docker和Compose；模型/搜索密钥在.env填写）：
+
+```bash
+sh scripts/init-env.sh
+sh scripts/build-sandbox.sh
+docker compose --profile production build
+docker compose up -d postgres minio redis
+docker compose --profile tools run --rm db-admin migrate
+docker compose --profile tools run --rm db-admin seed
+docker compose --profile production up -d --wait --wait-timeout 300
+```
+
+已有数据升级只应用新增010迁移，不修改旧迁移/种子或删除数据卷。已有.env缺少沙箱配置时补充SANDBOX_ENABLED=true、SANDBOX_RUNNER_URL=http://sandbox-runner:8091及独立SANDBOX_CONTROL_TOKEN；初始化脚本保留旧凭证。Windows开发使用相同容器镜像，前端继续在frontend执行npm run dev，不需要Ubuntu、gVisor或自定义宿主运行时。支持范围首先以本次实际linux/amd64验收为准，其他架构需构建对应镜像并验收。
+
+验收入口sh scripts/verify-m07a.sh，仅运行本阶段文件/隔离/资源/确认/真实模型目标组及一个SQL静态守卫，报告在忽略的verification/M07A目录。
+
 ## 未来待实现功能
+
+新阶段详见本地 docs/PRD.md、docs/DEVELOPMENT_PLAN.md 和 docs/ATTACHMENT_RUNTIME_DESIGN.md。文档按现有约定不随仓库分发；本节同时保存可随仓库阅读的实施摘要。
 
 M06A验收入口：`sh scripts/verify-m06a.sh` 执行4项边界测试、相关集成测试组及6项受影响回归；集成组覆盖真实RAG/公开/组合/直接回答、实际千问备用、故障状态，以及两路输入隔离和关键词生成后的轻量检查，使用独立测试库及检索集合，结果保存在本机 `verification/M06A/`。日常小改只运行受影响的目标用例，不重复整套M01～M06测试。浏览器脚本为 `scripts/verify-browser-m06a.ps1`，支持通过 `-Session <名称> -ReuseLoggedInSession` 复用已登录的隔离agent-browser会话；验收结束关闭本会话，登录配置由其创建者清理。
 
-- **沙箱文件与代码分析**：会话上传 CSV/XLSX，在按任务隔离的沙箱里检查文件、运行模型生成的 Python/文件数据 SQL，返回真实统计、图表和产物；无应用凭证、无企业/外网访问，不能绕过业务数据库的确认和权限。当前尚未实现。
-- **后续敏感动作接入**：已实现的人工二次确认Hook将在沙箱生成代码execute和对话知识提交的具体敏感操作前复用；用户同意不能扩大数据权限或沙箱权限。未来邮件/消息可展示收件人和完整待发内容后确认，首期不实现发送工具。
-- **工作记录整理**：对话转知识、纯文本会议纪要、文稿预览和下载。
+- **后续隔离增强**：当前沙箱采用普通Docker容器，共享宿主内核；gVisor/runsc或微虚拟机属于未来可选增强，本阶段不安装、不要求，不将普通容器宣称为同等强隔离。
+- **M07B 通用附件与自动执行**：TXT/MD/CSV/XLSX/DOCX/可提取文字 PDF；无附件直接主模型，有附件强制 attachment_prepare 提供真实概况，read_attachment 按需分页读取完整内容。run_sandbox_code 自动完成计算、多个表格联查、图表、转换/修改和真实文件生成，移除文件/代码人工确认，只有业务 SQL 继续需要 Hook。
+- **运行时与产物**：构建时预装 NumPy/pandas/openpyxl/DuckDB、绘图/中文字体、python-docx/pypdf、Pandoc/LibreOffice 等实际需要的依赖；MD→DOCX→PDF 复用转换链。返回受校验的 TXT/MD/CSV/XLSX/DOCX/PDF/PNG，原件只读、运行断网且无应用凭证，不动态安装包。会议纪要属于通用文本/文件任务，不新增专用工具；对话转知识功能完全取消，知识管理页手动上传/管理员审核保留。
+- **持久沙箱排队**：PG 记录 prepare/read/execute 任务；正常满额进入等待、空闲自动执行，worker 保存检查点并释放槽，结果保存后继续。排队可取消、有界积压/等待超时，结果未知不自动重跑。
+- **M07C 多实例扩容**：多个 worker 共享 Agent 队列、多个 Runner 共享沙箱队列；原子领取/租约/共享配额与 runner_id 归属清理，不能直接复制当前 Runner。先做有限同机多实例并发验收，提供配置及排空缩容，不引入 Celery/Kafka/自动弹性平台。
+- **后续敏感动作扩展**：未来邮件/消息等真实外部发送可使用 Hook 展示目标和完整待发内容，本轮不实现发送工具。本人确认不能扩大权限，自动沙箱执行也不能访问真实业务数据库。
 - **上下文与长期记忆**：可重建的短期缓存、上下文压缩、按用户隔离的自动后台记忆。
 - **审计工作台与任务恢复**：基于已建立的永久审计，实现管理员只读调试、后台任务恢复、备份与恢复验证。
 
@@ -324,10 +361,10 @@ docker compose --profile tools run --rm --no-deps --entrypoint python -v "${PWD}
 
 真实用例仅使用独立测试库内明确虚构的制度及公开IQS资料，不读取主库。结果保存在 `verification/answer-review/`；失败夹具覆盖返工上限、引用误放行、审核配置/鉴权/协议/重试和取消，不能当作真实模型成功证据。日常局部修改选择受影响的方法执行。
 
-M07已实现；后续实施顺序为 M07A 沙箱分析 → M08 对话转知识 → M09 文本纪要 → M10 上下文压缩 → M11 自动记忆 → M12 审计与交付回归。新增能力复用现有工具循环、通用敏感动作Hook、worker、审核入库和来源预览；基础权限、结果限额、执行预算及失败状态随各阶段实现。
+后续顺序为 M07B 通用附件/自动执行/排队 → M07C 多 worker/多 Runner 扩容 → M10 上下文压缩 → M11 自动记忆 → M12 审计与交付回归。原 M08/M09 阶段已删除，不复用原编号。先稳定附件与任务回执，再处理多实例恢复，后续缓存/记忆复用这些契约，减少调度返工。
 
 M07验收入口：`sh scripts/verify-m07.sh`，仅运行5个本阶段目标组、1个实际模型/PG用例及2个受影响的审核/RAG守卫。真实用例只使用独立测试库内外置虚构种子，输出在本地 `verification/M07/`。升级现有部署先执行 `docker compose --profile tools run --rm db-admin migrate` 应用008/009增量；新增代码提交模拟数据需执行 `docker compose --profile tools run --rm db-admin seed`（只导入未应用的005种子，已应用种子跳过），再更新api/worker；不修改旧迁移/种子、不重建数据卷。
 
-沙箱须在实际支持隔离后端的目标节点验收，Python及一种文件SQL引擎运行在无网络、无应用凭证的任务实例内。固定文件inspect自动检查，生成代码每次execute经人工二次确认 Hook展示文件/完整代码后确认，修改代码重新确认。所有待确认动作释放worker槽；执行后结果未知不自动重跑，再执行须新确认。知识提交复用一次文稿/ACL确认，管理员审核独立保留。文本纪要将支持本人会话资料附件，无需先发布知识库；摘要/长期记忆不能成为撤权后的企业正文入口。最终恢复验证采用维护窗口备份PostgreSQL和应用文件、重建派生索引，不新增独立调度或运维平台。这些均为后续交付约束，当前尚未实现。
+新设计继续采用普通 Docker 独立任务容器，附件读取和代码自动执行，保留资源/断网/文件所有权及审计边界；当前旧代码的确认路径要在 M07B 才移除。read_attachment 的完整读取能力允许分段覆盖，不将有限样例当全文；Word 首期指 DOCX，图片/音视频/OCR、旧 DOC 与宏/加密文件暂不支持。审核核对读取范围、真实执行与产物，publish 负责最终权限和交付，避免无引用规则覆盖有效转换/计算结果。摘要/长期记忆不能重引入撤权正文，最终恢复仍用维护窗口备份 PG/应用文件并重建派生索引。新增功能只做代表成功链路、关键边界和有限并发验收，不重复全部阶段压力测试。
 
 自动化任务流当前仅保留导航入口，具体配置与执行能力留待后续版本。每次更新代码时同步维护本 README 中的当前功能、启动步骤及待实现功能，使说明与实际版本一致。
