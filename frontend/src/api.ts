@@ -31,7 +31,7 @@ export interface UserProfile {
 
 export interface Conversation { conversation_id: string; title: string; created_at: string; updated_at: string; }
 export interface ChatRun {
-  run_id: string; conversation_id: string; trace_id: string; status: 'pending' | 'running' | 'waiting_confirmation' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  run_id: string; conversation_id: string; trace_id: string; status: 'pending' | 'running' | 'waiting_confirmation' | 'waiting_sandbox' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
   pending_action?: string | null;
   created_at: string; updated_at: string; error?: {code: string; message: string} | null;
 }
@@ -40,6 +40,7 @@ export interface ChatMessage {
   error?: {code: string; message: string} | null; model?: string | null;
   usage?: {source: 'reported' | 'estimated' | 'unavailable'; total_tokens: number | null} | null; finish_reason?: string | null;
   citations?: Citation[];
+  attachments?: AnalysisAttachment[];
 }
 export interface Citation { type?: 'knowledge' | 'web' | 'business' | 'sandbox'; result_id?: string; label: string; chunk_id?: string; document_id?: string; filename?: string; page?: number | null; heading?: string | null; position?: number;
   source_id?: string; title?: string; url?: string; website?: string; published_at?: string | null; fetched_at?: string;
@@ -129,8 +130,9 @@ export async function fetchEvents(): Promise<RunEvent[]> {
   return result.events;
 }
 
-export interface AnalysisAttachment {attachment_id:string;filename:string;format:string;size_bytes:number;original_sha256:string;}
-export interface SandboxResultData {result_id:string;description?:string;message?:string;columns?:string[];rows?:Record<string,unknown>[];row_count?:number;truncated?:boolean;chart?:{title?:string;partial?:boolean};files?:{attachment_id:string;file:string;sheet:string;table:string;columns:string[];row_count:number;missing:Record<string,number>;sample:Record<string,unknown>[]}[];artifacts:{artifact_id:string;filename:string;size_bytes:number;sha256:string}[];}
+export interface AnalysisAttachment {attachment_id:string;filename:string;format:string;size_bytes:number;original_sha256?:string;message_id?:string|null;}
+export interface AttachmentSummary {attachment_id:string;file:string;format?:string;status?:string;error?:string;sheet?:string;table?:string;columns?:string[];row_count?:number;missing?:Record<string,number>;sample?:unknown;sample_complete?:boolean;text_length?:number;page_count?:number;headings?:string[];empty_pages?:number[];}
+export interface SandboxResultData {result_id:string;operation?:string;description?:string;message?:string;text?:string;stdout?:string;coverage?:{scope:string;unit:string;start:number;end:number;total:number;complete:boolean};has_more?:boolean;next_offset?:number;columns?:string[];rows?:Record<string,unknown>[];row_count?:number;truncated?:boolean;chart?:{title?:string;partial?:boolean};files?:AttachmentSummary[];artifacts:{artifact_id:string;filename:string;size_bytes:number;sha256:string}[];}
 /** 接收本人会话编号及文件表单，发送原件和会话CSRF，不覆盖浏览器multipart边界。 */
 export async function uploadAnalysis(conversationId:string,form:FormData):Promise<AnalysisAttachment[]>{
   const csrf=document.cookie.split('; ').find(item=>item.startsWith('zhixing_csrf='))?.split('=').slice(1).join('=') || '';

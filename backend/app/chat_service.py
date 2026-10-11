@@ -22,7 +22,7 @@ def public_run(row: dict) -> dict:
     """接收内部执行行，返回本人可见状态及安全错误，排除输入上下文、租约和内部模型响应。"""
     state = row.get('state_json') or {}
     return {key:row[key] for key in ('run_id','trace_id','conversation_id','status','created_at','updated_at')} | {
-        'error':state.get('error'),'model':state.get('model'),'slot':state.get('slot'),'cancel_requested':row.get('cancel_requested',False),'pending_action':state.get('pending_action')}
+        'error':state.get('error'),'model':state.get('model'),'slot':state.get('slot'),'cancel_requested':row.get('cancel_requested',False),'pending_action':state.get('pending_action'),'pending_job':state.get('pending_job')}
 
 
 class RunWriter:
@@ -66,9 +66,23 @@ class RunWriter:
                 if run['cancel_requested'] or run['status']!='running':raise RunCancelled()
                 action=await conn.fetchrow('SELECT * FROM app_runtime.query_approvals WHERE approval_id=$1 AND run_id=$2 AND decision=\'pending\'',action_id,self.run['run_id'])
                 if action is None:raise GatewayError('ACTION_STATE_CHANGED','待确认动作状态已变化')
-                await conn.execute("UPDATE app_runtime.runs SET status='waiting_confirmation',state_json=state_json || $1::jsonb,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE run_id=$2",{'pending_action':action_id},self.run['run_id'])
+                await conn.execute("UPDATE app_runtime.runs SET status='waiting_confirmation',state_json=state_json || $1::jsonb,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE run_id=$2",{'pending_action':action_id,'resume_job':None,'pending_job':None},self.run['run_id'])
                 await self.append_event(conn,'confirmation.required',{'message':'敏感操作尚未执行，请确认本次操作','action':public_action(dict(action)),'status':'waiting_confirmation'})
                 await self.audit.append(self.run['trace_id'],'run.waiting_confirmation',{'action_id':action_id},user_id=self.run['user_id'],run_id=self.run['run_id'],connection=conn)
+
+    async def suspend_sandbox(self, job_id):
+        """接收已有检查点的沙箱job，在run锁内保存等待并释放worker；处理回执先到的竞争。"""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                run=await conn.fetchrow('SELECT * FROM app_runtime.runs WHERE run_id=$1 FOR UPDATE',self.run['run_id'])
+                if run['cancel_requested'] or run['status']!='running':raise RunCancelled()
+                job=await conn.fetchrow('SELECT * FROM app_runtime.sandbox_jobs WHERE job_id=$1 AND run_id=$2',job_id,self.run['run_id'])
+                if job is None:raise GatewayError('SANDBOX_STATE_CHANGED','沙箱任务不可恢复')
+                ready=job['result_json'] is not None
+                state={'pending_job':job_id,'resume_job':job_id if ready else None,'resume_action':None,'pending_action':None}
+                await conn.execute('UPDATE app_runtime.runs SET status=$1,state_json=state_json || $2::jsonb,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE run_id=$3','pending' if ready else 'waiting_sandbox',state,self.run['run_id'])
+                await self.append_event(conn,'sandbox.waiting',{'message':'回执已保存，等待继续回答' if ready else '等待附件处理或沙箱执行，空闲后自动继续','status':'pending' if ready else 'waiting_sandbox','job_id':job_id})
+                await self.audit.append(self.run['trace_id'],'run.waiting_sandbox',{'job_id':job_id,'ready':ready},user_id=self.run['user_id'],run_id=self.run['run_id'],connection=conn)
 
     async def record_model(self, kind: str, data: dict, usage: Usage | None):
         """接收模型实际请求、原始包或结果，在同一事务中保存尝试与永久审计；失败则阻止后续模型调用。"""
@@ -160,6 +174,9 @@ class ChatProcessor:
 
     async def recover(self):
         """无参数，明确结束租约已失效的运行并补录审计失败状态；不自动重复可能已发出的模型请求。"""
+        if self.sandbox:
+            from app.sandbox_queue import recover_queue
+            await recover_queue(self.pool,self.audit)
         async with self.pool.acquire() as conn:
             unresolved=await conn.fetch("SELECT a.approval_id,r.* FROM app_runtime.query_approvals a JOIN app_runtime.runs r USING(run_id) WHERE a.decision='executing' AND r.status IN ('failed','cancelled','interrupted')")
             for item in unresolved:
@@ -192,7 +209,8 @@ class ChatProcessor:
         started=monotonic()
         try:
             async with self.pool.acquire() as conn:
-                rows = await conn.fetch('SELECT m.* FROM app_runtime.messages m WHERE conversation_id=$1 AND user_id=$2 ORDER BY message_order',run['conversation_id'],run['user_id'])
+                from app.context import load_history
+                rows = await load_history(conn,run['conversation_id'],run['user_id'])
             assembler = ContextAssembler([dict(row) for row in rows],run['run_id'],self.settings.model_output_tokens)
             remaining=self.settings.run_timeout_seconds-run['state_json'].get('active_elapsed',0)
             async with asyncio.timeout(max(0.01,remaining)):

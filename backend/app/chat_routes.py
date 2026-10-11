@@ -9,7 +9,7 @@ from pydantic import Field, field_validator
 
 from app.auth import StrictBody, auth_error, current_context, mutation_context, security_event
 from app.chat_service import RunWriter, TERMINAL, public_run
-from app.context import ContextAssembler
+from app.context import ContextAssembler, load_history
 from app.ids import ShortId, new_id
 from app.model_gateway import GatewayError, ModelSlot
 from app.permissions import AuthContext
@@ -80,23 +80,34 @@ async def send_message(conversation_id: ShortId,body: MessageBody,request: Reque
                 if previous['state_json'].get('request_fingerprint')!=fingerprint:
                     raise auth_error(409,'REQUEST_KEY_REUSED','发送标识已用于其他消息，请重新发送')
                 return public_run(dict(previous))
-            if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM app_runtime.runs WHERE conversation_id=$1 AND status IN ('pending','running','waiting_confirmation'))",conversation_id):
+            if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM app_runtime.runs WHERE conversation_id=$1 AND status IN ('pending','running','waiting_confirmation','waiting_sandbox'))",conversation_id):
                 raise auth_error(409,'CONVERSATION_BUSY','这段会话正在生成回答，请等待结束或停止后再发送')
             if body.attachment_ids:
-                count=await conn.fetchval('SELECT count(*) FROM app_runtime.analysis_attachments WHERE attachment_id=ANY($1::varchar[]) AND user_id=$2 AND conversation_id=$3',body.attachment_ids,context.user_id,conversation_id)
+                count=await conn.fetchval('SELECT count(*) FROM app_runtime.analysis_attachments WHERE attachment_id=ANY($1::varchar[]) AND user_id=$2 AND conversation_id=$3 AND NOT draft_removed',body.attachment_ids,context.user_id,conversation_id)
                 if count!=len(body.attachment_ids):raise auth_error(404,'ATTACHMENT_NOT_FOUND','附件不可访问或不属于当前会话')
             run_id,message_id = new_id(),new_id()
-            rows = [dict(row) for row in await conn.fetch('SELECT * FROM app_runtime.messages WHERE conversation_id=$1 AND user_id=$2 ORDER BY message_order',conversation_id,context.user_id)]
-            rows.append({'role':'user','content':body.content,'run_id':run_id,'protocol_json':{}})
+            rows = await load_history(conn,conversation_id,context.user_id)
+            # 固定本次授权目录：已发送附件与当前待发送附件；上传但尚未发送的其他文件不可见。
+            files=await conn.fetch('''SELECT a.*,m.content AS source_question,m.created_at AS sent_at
+                FROM app_runtime.analysis_attachments a LEFT JOIN app_runtime.messages m ON m.message_id=a.message_id
+                WHERE a.user_id=$1 AND a.conversation_id=$2 AND NOT a.draft_removed
+                AND (a.message_id IS NOT NULL OR a.attachment_id=ANY($3::varchar[])) ORDER BY a.created_at,a.attachment_id''',context.user_id,conversation_id,body.attachment_ids)
+            catalog=[{'attachment_id':file['attachment_id'],'filename':file['filename'],'format':file['format'],'size_bytes':file['size_bytes'],
+                'message_id':file['message_id'] or message_id,'source_question':(file['source_question'] or body.content)[:600],
+                'sent_at':file['sent_at'].isoformat() if file['sent_at'] else None,'table_prefix':f'f{index+1}_s'} for index,file in enumerate(files)]
+            rows.append({'role':'user','content':body.content,'run_id':run_id,'protocol_json':{},'attachments':[file for file in catalog if file['attachment_id'] in body.attachment_ids]})
             slot = ModelSlot('primary',settings.primary_base_url,settings.primary_api_key.get_secret_value(),settings.primary_model,settings.primary_context_tokens)
             try:
-                ContextAssembler(rows,run_id,settings.model_output_tokens).assemble(slot)
+                ContextAssembler(rows,run_id,settings.model_output_tokens,catalog).assemble(slot)
             except GatewayError as error:
                 raise auth_error(413,error.code,error.message)
             run = dict(await conn.fetchrow('''INSERT INTO app_runtime.runs(run_id,trace_id,conversation_id,user_id,request_key,state_json)
                 VALUES($1,$2,$3,$4,$5,$6) RETURNING *''',run_id,request.state.trace_id,conversation_id,context.user_id,body.request_key,
-                {'request_fingerprint':fingerprint,'user_message_id':message_id,'auth_session_id':context.session_id,'attachment_ids':body.attachment_ids}))
+                {'request_fingerprint':fingerprint,'user_message_id':message_id,'auth_session_id':context.session_id,
+                 'attachment_ids':[file['attachment_id'] for file in catalog],'new_attachment_ids':body.attachment_ids,'attachment_catalog':catalog}))
             await conn.execute('INSERT INTO app_runtime.messages(message_id,conversation_id,user_id,role,content,run_id) VALUES($1,$2,$3,\'user\',$4,$5)',message_id,conversation_id,context.user_id,body.content,run_id)
+            await conn.execute('''UPDATE app_runtime.analysis_attachments SET message_id=$1 WHERE attachment_id=ANY($2::varchar[])
+                AND user_id=$3 AND conversation_id=$4 AND message_id IS NULL AND NOT draft_removed''',message_id,body.attachment_ids,context.user_id,conversation_id)
             title = ' '.join(body.content.split())[:36] if owned['title']=='新对话' else owned['title']
             await conn.execute('UPDATE app_runtime.conversations SET title=$1,updated_at=now() WHERE conversation_id=$2',title,conversation_id)
             await RunWriter(pool,request.app.state.audit,run).append_event(conn,'run.queued',{'message':'消息已保存，等待后台处理','user_message_id':message_id})
@@ -132,7 +143,7 @@ async def cancel_run(run_id: ShortId,request: Request,context: AuthContext=Depen
                 return public_run(dict(row))
             await conn.execute('UPDATE app_runtime.runs SET cancel_requested=true,updated_at=now() WHERE run_id=$1',run_id)
             await security_event(request,'chat.cancel_requested',{'run_id':run_id},context,conn)
-    if row['status'] in ('pending','waiting_confirmation'):
+    if row['status'] in ('pending','waiting_confirmation','waiting_sandbox'):
         async with request.app.state.pool.acquire() as conn:
             await conn.execute("UPDATE app_runtime.query_approvals SET decision='cancelled',execution_token_hash=NULL WHERE run_id=$1 AND decision IN ('pending','approved')",run_id)
         await RunWriter(request.app.state.pool,request.app.state.audit,run).finish('cancelled',{'code':'RUN_CANCELLED','message':'本次回答已停止'})

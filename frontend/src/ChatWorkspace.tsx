@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
-import { ArrowUp, Check, MessageSquare, Pencil, Square, X } from 'lucide-react';
+import { ArrowUp, Check, FileText, MessageSquare, Pencil, Square, X } from 'lucide-react';
 import { apiRequest, beijingTime, requestId, citationPages, citationTitle, type ChatEvent, type ChatMessage, type ChatRun, type Conversation, type ConversationDetail, type Citation } from './api';
 import { AnalysisAttachments } from './AnalysisAttachments';
 import { SourcePanel } from './SourcePanel';
@@ -8,13 +8,17 @@ import { ActionConfirmation } from './ActionConfirmation';
 import type { SensitiveAction } from './api';
 
 interface Props { conversationId: string | null; revision: number; userName: string; select: (id: string) => void; changed: () => Promise<void>; }
-const labels = {pending:'等待处理',running:'正在回答',waiting_confirmation:'等待人工确认',completed:'回答完成',failed:'回答失败',cancelled:'已停止',interrupted:'执行中断'};
+const labels = {pending:'等待处理',running:'正在回答',waiting_confirmation:'等待人工确认',waiting_sandbox:'等待沙箱执行',completed:'回答完成',failed:'回答失败',cancelled:'已停止',interrupted:'执行中断'};
 
 /** 接收本人所选会话与目录回调，渲染真实原消息、持久 SSE、停止和重命名，返回聊天工作区。 */
 export function ChatWorkspace({conversationId,revision,userName,select,changed}: Props) {
   // 附件编号仅描述本次输入，真实所有权由服务端验证。
   const [uploadBusy,setUploadBusy]=useState(false);
   const [attachmentIds,setAttachmentIds]=useState<string[]>([]);
+  // 成功发送版本驱动草稿清空；上传自动创建会话时保留尚未发送的文字。
+  const [sentRevision,setSentRevision]=useState(0);
+  const uploadConversation=useRef<string|null>(null);
+  const selectUploaded=useCallback((id:string)=>{uploadConversation.current=id;select(id);},[select]);
   const [messages,setMessages] = useState<ChatMessage[]>([]);
   const [title,setTitle] = useState('新对话');
   const [draft,setDraft] = useState('');
@@ -37,7 +41,7 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
   const bottom = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const viewport = useRef<HTMLDivElement>(null);
-  const busy = sending || run?.status==='pending' || run?.status==='running' || run?.status==='waiting_confirmation';
+  const busy = sending || run?.status==='pending' || run?.status==='running' || run?.status==='waiting_confirmation' || run?.status==='waiting_sandbox';
 
   /** 无参数从 PG 读取本人会话，返回资料，并同步原消息和当前任务，不信任浏览器历史内容。 */
   const refresh = useCallback(async () => {
@@ -49,7 +53,9 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
 
   useEffect(() => {
     let alive = true;
-    setError(''); setMessages([]); setRun(null); setLiveText(''); setEvents([]); setStage(''); setRenaming(false); setDraft(''); setLoading(false);setCitation(null);setAction(null);
+    setError(''); setMessages([]); setRun(null); setLiveText(''); setEvents([]); setStage(''); setRenaming(false); setLoading(false);setCitation(null);setAction(null);
+    if(uploadConversation.current!==conversationId || !conversationId)setDraft('');
+    uploadConversation.current=null;
     pendingKey.current = null; pinned.current = true;
     if (!conversationId) { setTitle('新对话'); return; }
     setLoading(true);
@@ -64,7 +70,7 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
     if (!run) return;
     let closed = false;
     let lastSequence = 0;
-    const historical = !['pending','running','waiting_confirmation'].includes(run.status);
+    const historical = !['pending','running','waiting_confirmation','waiting_sandbox'].includes(run.status);
     // 原生 EventSource 自动携带 Cookie 并按 Last-Event-ID 重连；服务器只重放 PG 已保存的事件。
     const stream = new EventSource(`/api/runs/${run.run_id}/events`);
     stream.addEventListener('run.event',event => {
@@ -82,8 +88,9 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
         }).catch(reason=>{if(!closed)setError(reason.message);});
       }
       if(value.type==='confirmation.decided' && !historical){setAction(null);setRun(current=>current ? {...current,status:'pending'} : current);}
+      if (!historical && (value.type==='sandbox.waiting' || value.type==='sandbox.ready')) setRun(current => current ? {...current,status:value.data.status || 'waiting_sandbox'} : current);
       if (value.type==='run.started' && !historical) setRun(current => current ? {...current,status:'running'} : current);
-      if (value.type.startsWith('run.') && value.data.status && !['pending','running','waiting_confirmation'].includes(value.data.status)) {
+      if (value.type.startsWith('run.') && value.data.status && !['pending','running','waiting_confirmation','waiting_sandbox'].includes(value.data.status)) {
         setAction(null);
         setRun(current => current ? {...current,status:value.data.status!,error:value.data.error} : current);
         setStopping(false); closed = true; stream.close();
@@ -130,7 +137,7 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
         pendingKey.current.conversation = id;
       }
       const next = await apiRequest<ChatRun>(`/conversations/${id}/messages`,'POST',{content,request_key:pendingKey.current.key,attachment_ids:attachmentIds});
-      setDraft(''); pendingKey.current = null; setRun(next); setStage('消息已保存，等待处理');
+      setDraft('');setAttachmentIds([]);setSentRevision(value=>value+1);pendingKey.current = null; setRun(next); setStage('消息已保存，等待处理');
       if (id!==conversationId) select(id);
       else await refresh();
       await changed();
@@ -170,6 +177,7 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
       {messages.map(message => <article className={`chat-message ${message.role}`} key={message.message_id}>
         <div className="message-meta"><strong>{message.role==='user' ? '你' : '知行'}</strong><time dateTime={message.created_at}>{beijingTime(message.created_at)}</time></div>
         {message.role==='assistant' ? <MarkdownReply content={message.content}/> : <div className="message-content">{message.content}</div>}
+        {message.role==='user' && !!message.attachments?.length && <div className="message-attachments" aria-label="本条消息发送的附件">{message.attachments.map(file=><div className="attachment-chip" key={file.attachment_id}><FileText size={18} aria-hidden="true"/><span title={file.filename}>{file.filename}</span><small>{Math.ceil(file.size_bytes/1024)} KiB</small></div>)}</div>}
         {!!message.citations?.length && <div className="message-sources" aria-label="回答引用">{message.citations.map(source=><button key={source.label} onClick={()=>setCitation(source)} aria-label={`来源 ${source.label} ${citationTitle(source)}`}>[{source.label}] {citationTitle(source)}{citationPages(source) ? ` · ${citationPages(source)}` : ''}</button>)}</div>}
         {message.finish_reason==='length' && <p className="message-limit-note">达到单次输出上限，可继续提问。</p>}
         {message.role==='user' && message.error && <p className="run-error">{message.error.message}</p>}
@@ -180,10 +188,10 @@ export function ChatWorkspace({conversationId,revision,userName,select,changed}:
       {action?.status==='pending' && <ActionConfirmation action={action} decided={()=>{setAction(null);void refresh();}}/>}
       <div ref={bottom} />
     </div>
-    <AnalysisAttachments conversationId={conversationId} disabled={busy || loading} select={select} changed={changed} selected={setAttachmentIds} uploading={setUploadBusy}/><form className="chat-composer-area" onSubmit={send}>
+    <AnalysisAttachments conversationId={conversationId} disabled={busy || loading || uploadBusy} select={selectUploaded} changed={changed} selected={setAttachmentIds} uploading={setUploadBusy} sentRevision={sentRevision}/><form className="chat-composer-area" onSubmit={send}>
       {error && <p className="error-text" role="alert">{error}</p>}
       <div className="composer"><label className="sr-only" htmlFor="message">消息</label><textarea id="message" placeholder="向知行提问，或粘贴需要讨论的文字…" disabled={loading || sending} maxLength={16000} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={onKey} />
-        <div><span>Enter 发送，Shift+Enter 换行</span>{busy ? <button type="button" aria-label="停止回答" disabled={stopping || sending} onClick={() => void stop()}><Square size={18} /></button> : <button aria-label="发送消息" disabled={!draft.trim() || loading || sending}><ArrowUp size={20} /></button>}</div>
+        <div><span>Enter 发送，Shift+Enter 换行</span>{busy ? <button type="button" aria-label="停止回答" disabled={stopping || sending} onClick={() => void stop()}><Square size={18} /></button> : <button aria-label="发送消息" disabled={!draft.trim() || loading || sending || uploadBusy}><ArrowUp size={20} /></button>}</div>
       </div>
     </form>
   </div>{citation && <SourcePanel key={citation.result_id || citation.source_id || citation.chunk_id} citation={citation} close={closeSource}/>}</div>;

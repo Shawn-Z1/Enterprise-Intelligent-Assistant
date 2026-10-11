@@ -30,7 +30,7 @@ async def heartbeat(settings, pool, audit, stopping: asyncio.Event):
     """接收配置、连接池、审计和停止事件，持续保存北京时间心跳及真实依赖状态；停止后返回。"""
     events,trace_id = InfrastructureEvents(),new_id()
     path,previous = Path(settings.worker_state_path),None
-    await audit.append(trace_id,'service.started',{'service':'worker','milestone':'M07A'})
+    await audit.append(trace_id,'service.started',{'service':'worker','milestone':'M07B'})
     while not stopping.is_set():
         results = await check_dependencies(settings)
         state = {'timestamp':beijing_now().isoformat(),'pid':os.getpid(),'ready':all(item.status=='ready' for item in results.values()),

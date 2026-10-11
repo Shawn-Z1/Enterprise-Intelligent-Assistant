@@ -3,3 +3,7 @@ __pycache__
 .pytest_cache
 tests
 *.log
+
+# 不将宿主生成的字节码缓存复制进Linux业务镜像。
+**/__pycache__
+*.pyc

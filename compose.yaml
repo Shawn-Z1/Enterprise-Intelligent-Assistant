@@ -47,6 +47,9 @@ x-backend-env: &backend-env
   MODEL_CIRCUIT_SECONDS: ${MODEL_CIRCUIT_SECONDS:-30}
   RUN_TIMEOUT_SECONDS: ${RUN_TIMEOUT_SECONDS:-240}
   WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+  SANDBOX_GLOBAL_CONCURRENCY: ${SANDBOX_GLOBAL_CONCURRENCY:-2}
+  SANDBOX_QUEUE_LIMIT: ${SANDBOX_QUEUE_LIMIT:-50}
+  SANDBOX_WAIT_SECONDS: ${SANDBOX_WAIT_SECONDS:-300}
   RUN_LEASE_SECONDS: ${RUN_LEASE_SECONDS:-60}
   KNOWLEDGE_MAX_FILE_BYTES: ${KNOWLEDGE_MAX_FILE_BYTES:-20971520}
   KNOWLEDGE_MAX_BATCH_BYTES: ${KNOWLEDGE_MAX_BATCH_BYTES:-52428800}
@@ -80,18 +83,21 @@ services:
   # 仅用于构建预备分析镜像，不是共享执行实例；真实任务由控制器逐次创建。
   sandbox-image:
     profiles: [tools]
-    image: zhixing-sandbox-guest:0.7.1
+    image: zhixing-sandbox-guest:0.7.2
     build:
       context: ./services/sandbox-runner
       dockerfile: guest.Dockerfile
     entrypoint: ["true"]
   sandbox-runner:
-    image: zhixing-sandbox-runner:0.7.1
+    image: zhixing-sandbox-runner:0.7.2
     build: ./services/sandbox-runner
     environment:
       SANDBOX_CONTROL_TOKEN: ${SANDBOX_CONTROL_TOKEN:?请初始化沙箱控制密钥}
-      SANDBOX_TASK_IMAGE: zhixing-sandbox-guest:0.7.1
+      SANDBOX_TASK_IMAGE: zhixing-sandbox-guest:0.7.2
       SANDBOX_INPUT_VOLUME: zhixing-sandbox-inputs
+      SANDBOX_API_URL: http://api:8000/internal/sandbox
+      SANDBOX_RUNNER_ID: sandbox-runner-1
+      SANDBOX_RUNNER_CONCURRENCY: ${SANDBOX_RUNNER_CONCURRENCY:-2}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - sandbox-state:/var/lib/sandbox
@@ -161,7 +167,7 @@ services:
 
   api:
     build: ./backend
-    image: zhixing-backend:0.7.1
+    image: zhixing-backend:0.7.2
     environment: *backend-env
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
@@ -175,7 +181,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: zhixing-backend:0.7.1
+    image: zhixing-backend:0.7.2
     build: ./backend
     command: ["python", "-m", "app.worker"]
     environment: *backend-env
@@ -191,7 +197,7 @@ services:
   # 显式管理任务：外置迁移和种子只读挂载，不在应用启动时自动导入。
   db-admin:
     profiles: ["tools"]
-    image: zhixing-backend:0.7.1
+    image: zhixing-backend:0.7.2
     build: ./backend
     entrypoint: ["python", "-m", "app.db_admin"]
     environment:
@@ -230,6 +236,9 @@ services:
       MODEL_CIRCUIT_SECONDS: ${MODEL_CIRCUIT_SECONDS:-30}
       RUN_TIMEOUT_SECONDS: ${RUN_TIMEOUT_SECONDS:-240}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+      SANDBOX_GLOBAL_CONCURRENCY: ${SANDBOX_GLOBAL_CONCURRENCY:-2}
+      SANDBOX_QUEUE_LIMIT: ${SANDBOX_QUEUE_LIMIT:-50}
+      SANDBOX_WAIT_SECONDS: ${SANDBOX_WAIT_SECONDS:-300}
       RUN_LEASE_SECONDS: ${RUN_LEASE_SECONDS:-60}
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD}
       INITIAL_DEMO_PASSWORD: ${INITIAL_DEMO_PASSWORD}

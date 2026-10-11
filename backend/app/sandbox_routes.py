@@ -12,7 +12,7 @@ router=APIRouter(prefix='/api')
 
 @router.post('/conversations/{conversation_id}/attachments',status_code=201)
 async def upload(conversation_id: ShortId,request: Request,files: list[UploadFile]=File(...),context=Depends(mutation_context)):
-    """接收本人会话CSV/XLSX字节，仅校验扩展名/大小/指纹；正文在沙箱内检查，不在API开表。"""
+    """接收本人会话受支持文件字节，仅校验扩展名/大小/指纹；正文在沙箱内检查，不在API开表。"""
     pool=request.app.state.pool;storage=request.app.state.knowledge_storage
     async with pool.acquire() as conn:
         if not await conn.fetchval('SELECT 1 FROM app_runtime.conversations WHERE conversation_id=$1 AND user_id=$2',conversation_id,context.user_id):raise auth_error(404,'NOT_FOUND','会话不可访问')
@@ -21,7 +21,7 @@ async def upload(conversation_id: ShortId,request: Request,files: list[UploadFil
     total=0;answer=[]
     for file in files:
         name=PurePath((file.filename or '').replace('\\','/')).name[:180];kind=name.rsplit('.',1)[-1].lower()
-        if kind not in ('csv','xlsx'):raise auth_error(422,'FORMAT_NOT_SUPPORTED','分析附件只支持CSV/XLSX')
+        if kind not in ('csv','xlsx','txt','md','docx','pdf'):raise auth_error(422,'FORMAT_NOT_SUPPORTED','附件支持TXT/MD/CSV/XLSX/DOCX和文字PDF，暂不支持图片/音视频')
         raw=await file.read(20*1024*1024+1);total+=len(raw)
         if not raw or len(raw)>20*1024*1024 or total>50*1024*1024:raise auth_error(413,'FILE_LIMIT','单文件20MiB，批次50MiB')
         ident=new_id();key=f'analysis/{context.user_id}/{ident}';sha=hashlib.sha256(raw).hexdigest()
@@ -41,7 +41,22 @@ async def attachments(conversation_id: ShortId,request: Request,context=Depends(
     """返回本人会话原文件元数据，刷新可恢复附件列表，不返回存储密钥。"""
     async with request.app.state.pool.acquire() as conn:
         if not await conn.fetchval('SELECT 1 FROM app_runtime.conversations WHERE conversation_id=$1 AND user_id=$2',conversation_id,context.user_id):raise auth_error(404,'NOT_FOUND','会话不可访问')
-        return [dict(row) for row in await conn.fetch('SELECT attachment_id,filename,format,size_bytes,original_sha256 FROM app_runtime.analysis_attachments WHERE conversation_id=$1 AND user_id=$2 ORDER BY created_at',conversation_id,context.user_id)]
+        return [dict(row) for row in await conn.fetch('SELECT attachment_id,filename,format,size_bytes,original_sha256,message_id FROM app_runtime.analysis_attachments WHERE conversation_id=$1 AND user_id=$2 AND NOT draft_removed ORDER BY created_at,attachment_id',conversation_id,context.user_id)]
+
+
+@router.delete('/conversations/{conversation_id}/attachments/{attachment_id}')
+async def remove_draft(conversation_id: ShortId,attachment_id: ShortId,request: Request,context=Depends(mutation_context)):
+    """接收本人会话/附件编号，仅移除未发送草稿并审计；保留原字节，不删除已发送消息的文件。"""
+    async with request.app.state.pool.acquire() as conn:
+        async with conn.transaction():
+            # 与发送操作共用会话锁，避免移除草稿和发送之间出现竞态。
+            owned=await conn.fetchval('SELECT conversation_id FROM app_runtime.conversations WHERE conversation_id=$1 AND user_id=$2 FOR UPDATE',conversation_id,context.user_id)
+            if not owned:raise auth_error(404,'NOT_FOUND','会话不可访问')
+            value=await conn.fetchval('''UPDATE app_runtime.analysis_attachments SET draft_removed=true
+                WHERE attachment_id=$1 AND conversation_id=$2 AND user_id=$3 AND message_id IS NULL RETURNING attachment_id''',attachment_id,conversation_id,context.user_id)
+            if not value:raise auth_error(404,'NOT_FOUND','未发送附件不存在或不可移除')
+            await security_event(request,'analysis.draft_removed',{'attachment_id':attachment_id},context,conn)
+    return {'removed':True}
 
 
 @router.get('/sandbox/results/{result_id}')
@@ -60,5 +75,7 @@ async def artifact(artifact_id: ShortId,request: Request,context=Depends(current
         row=await conn.fetchrow('SELECT a.* FROM app_runtime.sandbox_artifacts a JOIN app_runtime.sandbox_results r USING(result_id) WHERE artifact_id=$1 AND r.user_id=$2',artifact_id,context.user_id)
     if row is None:raise auth_error(404,'NOT_FOUND','产物不可访问')
     data=await request.app.state.knowledge_storage.read_verified({**dict(row),'original_sha256':row['sha256']})
-    png=row['filename'].endswith('.png')
-    return Response(data,media_type='image/png' if png else 'text/csv',headers={'Content-Disposition':('inline' if png else 'attachment')+"; filename*=UTF-8''"+quote(row['filename']),'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'})
+    kind=row['filename'].rsplit('.',1)[-1].lower()
+    png=kind=='png'
+    media={'png':'image/png','pdf':'application/pdf','csv':'text/csv','txt':'text/plain','md':'text/markdown','docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}
+    return Response(data,media_type=media[kind],headers={'Content-Disposition':('inline' if kind in ('png','pdf') else 'attachment')+"; filename*=UTF-8''"+quote(row['filename']),'X-Content-Type-Options':'nosniff','Cache-Control':'no-store','Content-Security-Policy':"sandbox; default-src 'none'"})

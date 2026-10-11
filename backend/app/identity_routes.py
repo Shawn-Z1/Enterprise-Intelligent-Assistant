@@ -187,10 +187,12 @@ async def conversation(conversation_id: ShortId,request: Request,context: AuthCo
         if owned is not None:
             messages = await conn.fetch("""SELECT m.message_id,m.role,m.content,m.created_at,m.message_order,m.run_id,r.status AS run_status,
                 r.state_json->'error' AS error,m.protocol_json->>'model' AS model,m.protocol_json->'usage' AS usage,m.protocol_json->>'finish_reason' AS finish_reason,
-                m.protocol_json->'message'->'citations' AS citations
+                m.protocol_json->'message'->'citations' AS citations,
+                COALESCE((SELECT jsonb_agg(jsonb_build_object('attachment_id',a.attachment_id,'filename',a.filename,'format',a.format,'size_bytes',a.size_bytes) ORDER BY a.created_at,a.attachment_id)
+                    FROM app_runtime.analysis_attachments a WHERE a.message_id=m.message_id AND a.user_id=m.user_id AND a.conversation_id=m.conversation_id),'[]'::jsonb) AS attachments
                 FROM app_runtime.messages m LEFT JOIN app_runtime.runs r ON r.run_id=m.run_id
                 WHERE m.conversation_id=$1 AND m.user_id=$2 ORDER BY m.message_order""",conversation_id,context.user_id)
-            active = await conn.fetchrow("SELECT run_id,trace_id,status,created_at,updated_at,state_json->>'pending_action' AS pending_action FROM app_runtime.runs WHERE conversation_id=$1 AND user_id=$2 AND status IN ('pending','running','waiting_confirmation') ORDER BY created_at DESC LIMIT 1",conversation_id,context.user_id)
+            active = await conn.fetchrow("SELECT run_id,trace_id,status,created_at,updated_at,state_json->>'pending_action' AS pending_action FROM app_runtime.runs WHERE conversation_id=$1 AND user_id=$2 AND status IN ('pending','running','waiting_confirmation','waiting_sandbox') ORDER BY created_at DESC LIMIT 1",conversation_id,context.user_id)
             last_run = await conn.fetchrow("SELECT run_id,trace_id,conversation_id,status,created_at,updated_at,state_json->'error' AS error FROM app_runtime.runs WHERE conversation_id=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT 1",conversation_id,context.user_id)
             public_messages = []
             for message in messages:

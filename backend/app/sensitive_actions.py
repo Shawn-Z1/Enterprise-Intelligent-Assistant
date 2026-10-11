@@ -11,9 +11,9 @@ from app.ids import new_id
 from app.timezones import beijing_now
 
 
-POLICY_VERSION=1
+POLICY_VERSION=2
 # 策略只由服务端注册，message.send仅保留展示契约，没有生产发送执行器。
-ACTION_POLICIES={'knowledge.read':'automatic','public.search':'automatic','sandbox.inspect':'automatic','sandbox.execute':'confirmation','business.query':'confirmation','message.send':'confirmation'}
+ACTION_POLICIES={'knowledge.read':'automatic','public.search':'automatic','business.query':'confirmation','message.send':'confirmation'}
 
 
 class ActionRequest(BaseModel):

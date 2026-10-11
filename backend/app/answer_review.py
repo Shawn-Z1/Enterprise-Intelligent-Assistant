@@ -41,7 +41,7 @@ REVIEW_INSTRUCTIONS = """你是独立的企业智能助理答案审核员。只�
 检查每个实质问题，指出具体原句或步骤、对应记录和可执行建议。不能凭你的记忆补充资料、断言没执行的工具一定能成功；无权限不能要求越权，安全拒绝不能要求绕过。任务无结果/服务失败/资料冲突时诚实说明限制也可以通过，不为措辞喜好或无必要的检索驳回。
 当前可用工具见available_tools。审核建议不能把内部知识/历史内容变成公开关键词；公开搜索始终仅从用户本次公开任务生成，同run重复搜索只复用已保存快照，不能建议换主模型query以重复外发。
 业务结果scope表示可读权限上限，不表示本次返回全表；必须结合executed_query或action_request中的冻结SQL/参数核对筛选条件。returned_numeric_totals是后端计算的返回行数值合计，答案声称这些行的合计时必须一致；截断结果不能称全量合计。WHERE筛选本人后的真实结果可以回答本人统计，不能因权限可读全表而误称部门全量或声称不能查询本人。
-文件分析事实需要run_sandbox_code真实执行回执；inspect仅提供表结构和样例，不能冒充全量统计或代码执行。execute须真实批准后运行，依据回执核对文件/工作表/行数/缺失值口径，样例/截断必须说明。下载和图表仅引用当前实际生成产物，失败不能称成功。
+文件分析事实需要run_sandbox_code真实执行回执；附件预处理仅提供结构和有限样例，不能冒充全量统计或代码执行。附件/生成代码自动运行，不需要人工批准；业务PG SQL仍必须确认。attachment_preparation是主模型前真实固定预处理，不是模型tool_calls；read_attachment按页/字符/行范围读取，全文总结需覆盖相关正文。计算/转换可以在原件上执行而不必先把全文发给模型，依据实际回执核对范围和结果。下载和图表仅引用当前实际生成产物，失败不能称成功。
 只输出一个JSON对象，不输出Markdown或思考。格式：{"verdict":"approve|revise|insufficient","issues":[{"aspect":"task_completion|execution_truth|evidence_consistency|repair_feasibility","target":"原句或步骤","basis":"实际记录或证据","suggestion":"修正建议"}]}。
 approve的issues必须为空；revise表示有具体可行的修正路径；insufficient表示仍无足够证据且不能合理继续，应交付已确认资料和限制，issues必须非空。后端事实检查错误不能通过。
 """
@@ -53,7 +53,7 @@ def source_key(citation: dict) -> tuple:
     return ('web',citation.get('url')) if citation.get('type')=='web' else ('knowledge',citation.get('chunk_id'))
 
 
-def check_execution(messages: list[dict], records: list[dict], citations: list[dict], answer: str) -> list[dict]:
+def check_execution(messages: list[dict], records: list[dict], citations: list[dict], answer: str, preparation=None) -> list[dict]:
     """接收本轮协议、PG工具记录、来源和草稿，核验实际调用/结果/引用的对应关系，返回确定性问题。"""
     issues = []
     def add(target, basis, suggestion):
@@ -94,12 +94,13 @@ def check_execution(messages: list[dict], records: list[dict], citations: list[d
         if row['status']!=status:
             add(call['id'],'工具状态与实际错误类别不一致','使用真实拒绝/失败状态，不误报完成或无结果')
     sources = {source_key(item):item for row in records for item in (row.get('output_json') or {}).get('citations',[])}
+    for item in (preparation or {}).get('citations',[]):sources[source_key(item)]=item
     for citation in citations:
         trusted = sources.get(source_key(citation))
         if trusted is None or any(citation.get(key)!=trusted.get(key) for key in ('label','content')):
             add('来源 '+citation['label'],'来源不存在于本轮实际工具结果','删除未提供的来源，不用历史来源冒充当前检索')
     # 普通数组[1]不误判为引用；有工具观察时才按现有来源标号契约核验。
-    if records and any(label not in {row['label'] for row in citations} for label in re.findall(r'\[(\d+)\]',answer)):
+    if (records or preparation) and any(label not in {row['label'] for row in citations} for label in re.findall(r'\[(\d+)\]',answer)):
         add('答案引用编号','草稿引用了未提供的来源编号','改用本轮真实来源或明确证据不足')
     return issues
 
@@ -109,13 +110,29 @@ def visible_messages(messages: list[dict]) -> list[dict]:
     return [{key:value for key,value in message.items() if key in ('role','content','tool_calls','tool_call_id','name')} for message in messages]
 
 
+def review_output(row):
+    """接收已验证工具记录，保留范围/产物而将重复正文指向同一真实轨迹，避免审核窗口重复灌入长文。"""
+    value=model_observation(row['output_json'] or {},row['tool_name'])
+    if row['tool_name'] in ('read_attachment','run_sandbox_code') and 'result' in value:
+        value['verified_trajectory_call']=row['provider_call_id']
+        for key in ('text','rows','stdout'):
+            if key in value['result']:value['result'][key]='内容已在本轮轨迹相同tool_call_id提供且经PG核对一致'
+    return value
+
+
 async def evaluate(agent, state: dict) -> tuple[ReviewDecision,list[dict]]:
     """接收Agent及本轮图状态，读取真实工具记录并调用独立审核模型；返回语义意见和后端确定性问题。"""
     async with agent.processor.pool.acquire() as conn:
         rows = await conn.fetch('SELECT t.tool_name,t.provider_call_id,t.protocol_message,t.status,t.input_json,t.output_json,a.payload_json AS action_request FROM app_runtime.tool_calls t LEFT JOIN app_runtime.query_approvals a USING(call_id) WHERE t.run_id=$1 ORDER BY t.created_at,t.call_id',agent.writer.run['run_id'])
+        preparation=await conn.fetchval("SELECT payload->'output' FROM app_runtime.run_events WHERE run_id=$1 AND event_type='attachment.prepared' ORDER BY sequence LIMIT 1",agent.writer.run['run_id'])
     records = [dict(row) for row in rows]
     result=unpack_result(state['result'])
-    issues = check_execution(state['messages'],records,agent.citations,result.content)
+    issues = check_execution(state['messages'],records,agent.citations,result.content,preparation)
+    if state.get('attachment_context') and state['attachment_context']!=preparation:
+        issues.append({'aspect':'execution_truth','target':'附件预处理','basis':'图上下文与持久预处理回执不一致','suggestion':'停止交付，不能伪造附件概况'})
+    artifacts={item['artifact_id'] for row in records for item in (row.get('output_json') or {}).get('result',{}).get('artifacts',[])}
+    if any(ident not in artifacts for ident in re.findall(r'/api/sandbox/artifacts/([A-Za-z0-9_-]+)',result.content)):
+        issues.append({'aspect':'evidence_consistency','target':'答案引用编号','basis':'下载链接未对应本轮实际产物','suggestion':'仅使用真实回执的产物编号'})
     if any(item['target']!='答案引用编号' for item in issues):
         # 执行记录本身不可信时，改写答案不能修好记录；直接停止，避免摘录也携带不可靠来源。
         await agent.processor.audit.append(agent.writer.run['trace_id'],'answer.facts_rejected',{'issues':issues},
@@ -126,8 +143,8 @@ async def evaluate(agent, state: dict) -> tuple[ReviewDecision,list[dict]]:
     def factory(slot):
         """接收独立审核槽位，使用其窗口整理相关历史与完整本轮轨迹，返回审核专属消息。"""
         payload = {'user_question':agent.current_input,'related_context':visible_messages(agent.assembler.assemble(slot)),
-                   'trajectory':visible_messages(state['messages']),'available_tools':tools,
-                   'tool_records':[{key:value for key,value in row.items() if key!='output_json'} | {'output':model_observation(row['output_json'] or {},row['tool_name'])} for row in records],
+                   'trajectory':visible_messages(state['messages']),'available_tools':tools,'attachment_preparation':preparation,
+                   'tool_records':[{key:value for key,value in row.items() if key!='output_json'} | {'output':review_output(row)} for row in records],
                    'draft_answer':result.content,'backend_issues':issues,'revision_count':state['revisions']}
         return [{'role':'system','content':REVIEW_INSTRUCTIONS},{'role':'user','content':json.dumps(redact_secrets(payload,agent.processor.audit.secrets),ensure_ascii=False)}]
     async def silent_emit(kind, data):

@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     model_circuit_seconds: float = Field(default=30,ge=0.01,le=300)
     run_timeout_seconds: int = Field(default=240,ge=5,le=900)
     worker_concurrency: int = Field(default=2,ge=1,le=4)
+    # 沙箱队列容量与排队时限独立于聊天worker额度，普通满额不直接失败。
+    sandbox_global_concurrency: int = Field(default=2,ge=1,le=16)
+    sandbox_queue_limit: int = Field(default=50,ge=1,le=500)
+    sandbox_wait_seconds: int = Field(default=300,ge=10,le=1800)
     run_lease_seconds: int = Field(default=60,ge=20,le=300)
     knowledge_max_file_bytes: int = Field(default=20*1024*1024,ge=1024,le=50*1024*1024)
     knowledge_max_batch_bytes: int = Field(default=50*1024*1024,ge=1024,le=200*1024*1024)
