@@ -10,10 +10,10 @@ from app.knowledge_service import KnowledgeService, INACTIVE, fingerprint
 class KnowledgeProcessor:
     """后台处理预览、已批准原件及独立索引任务，未经批准不产生切片或向量。"""
 
-    def __init__(self,pool,settings,storage,audit,indexer=None):
-        """接收受限数据库、限制配置、原件存储和审计，初始化 worker 标识与公共知识服务。"""
+    def __init__(self,pool,settings,storage,audit,indexer=None,worker_id=None):
+        """接收受限pool、settings、storage、audit、可选indexer及统一worker_id，初始化知识队列处理器，不领取任务。"""
         self.pool,self.settings,self.storage,self.audit = pool,settings,storage,audit
-        self.worker_id = new_id()
+        self.worker_id = worker_id or new_id()
         self.service = KnowledgeService(pool,storage,audit)
         # 生产 worker 提供真实索引器；M05 隔离回归仅验证审批与解析，不执行后续阶段。
         self.indexer = indexer

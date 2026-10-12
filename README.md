@@ -1,8 +1,8 @@
 # 知行 · 企业智能助理
 
-面向企业员工的浏览器工作台，用于集中处理企业知识、业务数据和工作记录。当前M07B版本支持通用附件预处理/详细读取、自动沙箱计算/文件生成和持久排队、真实账号、职员权限管理、主备模型对话、独立模型答案审核、知识提交与审核、完整混合检索、公开搜索、敏感动作人工二次确认、受限Text to SQL及真实结果表格/图表、来源预览和永久审计。
+面向企业员工的浏览器工作台，用于集中处理企业知识、业务数据和工作记录。当前M07C版本增加多 worker/多 Runner 协同调度、共享资源额度和排空缩容，继续支持通用附件预处理/详细读取、自动沙箱计算/文件生成和持久排队、真实账号、职员权限管理、主备模型对话、独立模型答案审核、知识提交与审核、完整混合检索、公开搜索、敏感动作人工二次确认、受限Text to SQL及真实结果表格/图表、来源预览和永久审计。
 
-M07B 已实现 TXT/MD/CSV/XLSX/DOCX/文字PDF、本轮新附件强制预处理、read_attachment 分页读取、自动代码执行、真实文件下载和 PG 沙箱排队。附件随用户消息发送，整个会话后续可继续读取原件；未发送草稿不进入模型。原 M08 对话转知识与专用纪要工具取消；会议整理通过通用能力完成。只有业务数据库 SQL 继续触发人工二次确认，多 worker/多 Runner 扩容留在 M07C。
+M07B 已实现 TXT/MD/CSV/XLSX/DOCX/文字PDF、本轮新附件强制预处理、read_attachment 分页读取、自动代码执行、真实文件下载和 PG 沙箱排队。附件随用户消息发送，整个会话后续可继续读取原件；未发送草稿不进入模型。原 M08 对话转知识与专用纪要工具取消；会议整理通过通用能力完成。只有业务数据库 SQL 继续触发人工二次确认。M07C 已实现同一 Linux Docker 引擎上的多副本调度，正常满额排队后自动继续，未知执行结果不自动重跑。
 
 ## 当前功能
 
@@ -25,7 +25,7 @@ M07B 已实现 TXT/MD/CSV/XLSX/DOCX/文字PDF、本轮新附件强制预处理�
 - **统一模型网关**：主、备用和审核槽位各使用 URL、API Key、模型名接入。默认 DeepSeek 主模型、千问备用及独立千问审核；适配公开思考参数及流式用量，业务代码不直接调用厂商接口。
 - **失败与降级**：主模型总尝试最多三次，仍失败切备用，备用最多三次；凭证和参数错误直接停止该槽位的重试。包含退避、初始熔断与半开探测，全部失败明确结束，不把半截回复保存为完整回答。
 - **上下文与用量**：模型实际收到本人已完成轮次和本次输入，保留原始请求、流式包及合并回复。每个槽位独立检查窗口和输出预留；超窗明确拒绝，自动压缩尚未接入。供应商用量标为 reported，无供应商用量时明确估算方法，失败时未知数值为空；流式累计用量不重复相加。
-- **模型分词预算**：DeepSeek Flash使用官方V4.1参考分词器，当前千问备用型号使用DashScope官方Qwen参考分词器；在本地计算文本及消息/工具预算，不每次联网计数，不下载推理权重。保留聊天格式预留与20%安全余量，本地请求总数标estimated，不能冒充云端完整模板或计费用量。未知型号才回退字节上界；Embedding/重排保留各自真实分词器，供应商实际usage优先，不改旧审计记录。
+- **模型分词预算**：DeepSeek Flash使用官方V4.1参考分词器，当前千问备用型号使用DashScope官方Qwen参考分词器；在本地计算文本及消息/工具预算，不每次联网计数，不下载推理权重。保留聊天格式预留与可配置安全余量（默认5%），本地请求总数标estimated，不能冒充云端完整模板或计费用量。未知型号才回退字节上界；Embedding/重排保留各自真实分词器，供应商实际usage优先，不改旧审计记录。
 - **北京时间**：应用事件、接口日期、数据库连接及前端展示统一使用 `Asia/Shanghai`、`+08:00`；初始化脚本中的无时区时间也按北京时间解释。既有 Demo 数据的实际时刻和正文不变，供应商原始协议包保留原样。
 - **真实登录与注册**：账号密码登录、零权限普通成员注册、密码显隐、退出和刷新恢复。会话保存在 PostgreSQL，浏览器使用 HttpOnly Cookie，写操作验证会话绑定的 CSRF。
 - **个人中心**：展示可信账号、角色、部门、职级、岗位及业务资格，支持修改本人姓名和密码；修改密码会撤销所有旧会话。
@@ -117,9 +117,9 @@ WEB_SEARCH_API_KEY=
 
 网页读取在连接时固定已校验公网IP，每次重定向复检，不使用环境代理/Cookie。若本机代理将域名解析到 `198.18.*` 等非公网地址，直接读取会被拒绝，仍可使用提供商返回片段，界面会明确区分；不会放宽内网保护。未知日期保持空，模型和提供商不能保证每个问题都有足够证据；搜索不是任意语义秘密的自动识别系统。
 
-可选策略见 `.env.example`：输出默认最多 2048 tokens；读取超时 45 秒；任务预算 240 秒；连续三次故障熔断 30 秒；worker 默认并发 2。上下文使用保守能力目录下限，已知协议默认 32768、其他兼容服务默认 8192；可通过 `PRIMARY_CONTEXT_TOKENS` / `FALLBACK_CONTEXT_TOKENS` / `REVIEW_CONTEXT_TOKENS` 分别指定服务实际支持的窗口，`0` 表示使用目录默认值。估算包含完整请求与输出预留，并留 20% 安全余量。审核轨迹不靠模型自述摘要，超过审核槽位窗口则明确交付审核限制，不截掉工具事实后声称已审完整轨迹。
+可选策略见 `.env.example`：当前环境和样例单次输出最多8192 tokens，未配置时默认4096（兼容较小窗口）；读取超时45秒；任务预算240秒；连续三次故障熔断30秒；worker默认并发2。2026-10-12按官方说明核对 deepseek-flash、qwen3.7-flash（含2026-07-15快照）、qwen3.8-flash 的100万token窗口；`PRIMARY_CONTEXT_TOKENS` / `FALLBACK_CONTEXT_TOKENS` / `REVIEW_CONTEXT_TOKENS` 分别覆盖各槽位窗口，`0`使用型号目录，未知型号仍使用保守值（已知协议32768、其他兼容服务8192）。改用小窗口模型时必须同步窗口和输出预算。`MODEL_CONTEXT_SAFETY_RATIO=0.95`统一控制历史组装、工具循环和网关（含审核）的预算，输入/工具定义/输出预留合计不超过窗口95%；100万窗口、8192输出预留下，输入预算约941808 tokens。该余量是应用策略，不是供应商限制或精确计数保证。审核轨迹超过其窗口时明确交付审核限制，不截掉工具事实后声称已审完整轨迹。
 
-文本预算按实际模型名选择分词器，不以字节数代替当前DeepSeek/千问的分词。DeepSeek词表约6MiB，版本/来源/哈希记录在 `backend/tokenizer_assets/manifest.json`，Docker构建时校验缓存或下载，运行时不联网；不安装Torch或GPU推理依赖。千问官方SDK的参考词表不保证与 `qwen3.8-flash` 云端完全一致，模型别名更新时需核对词表。请求JSON结构与服务端隐藏模板不同，完整请求预算仍为估算；每次请求审计保存预算值、方法及分词器标识，最终计费以实际usage为准。该改动不实现M10压缩，也不自动扩大上下文窗口。
+文本预算按实际模型名选择分词器，不以字节数代替当前DeepSeek/千问的分词。DeepSeek词表约6MiB，版本/来源/哈希记录在 `backend/tokenizer_assets/manifest.json`，Docker构建时校验缓存或下载，运行时不联网；不安装Torch或GPU推理依赖。千问官方SDK的参考词表不保证与 `qwen3.8-flash` 云端完全一致，模型别名更新时需核对词表。请求JSON结构与服务端隐藏模板不同，完整请求预算仍为估算；每次请求审计保存预算值、方法及分词器标识，最终计费以实际usage为准。已核对型号使用上述窗口目录，仍未实现M10自动压缩。
 
 已有 `.env` 和数据卷时保留原凭证；从旧版升级时仅补齐新增配置，不重置旧配置。api/worker 使用应用、业务及模型凭证，数据库管理员及初始账号密码只交给显式管理任务。模型调用会产生服务商实际费用。
 
@@ -324,7 +324,7 @@ run_sandbox_code 自动完成临时计算、多文件联查、清洗、柱/线/�
 
 PG sandbox_jobs 保存有限参数/文件引用、指纹、领取版本、Runner归属、取消和回执；不保存整份Base64文件。worker 提交后保存LangGraph检查点，以 waiting_sandbox 释放执行槽。Runner经独立令牌认证的内部API有额度才领取任务，API读取并复验MinIO输入；Runner不持有应用PG/MinIO凭证，任务容器也没有控制令牌。回执及真实产物保存后Agent自动恢复。正常并发满额等待，不要求重新发问；排队可取消、积压/最长等待有界，重复通知不多执行，结果未知不盲目重跑，代码尝试最多3次。
 
-当前单Runner每实例2/全局2/每用户1；SANDBOX_RUNNER_CONCURRENCY、SANDBOX_GLOBAL_CONCURRENCY、SANDBOX_QUEUE_LIMIT（默认50）、SANDBOX_WAIT_SECONDS（默认300）可配置。全局与用户额度以PG为准，Runner本地Semaphore只作保护；参数改变后重创建相关服务。节点重启只清理本runner_id归属实例，M07C尚未做多实例交付验收，不能据此宣称已无限扩容。
+当前默认2个Runner、每实例1槽/全局2槽/每用户1槽；SANDBOX_RUNNER_REPLICAS、SANDBOX_RUNNER_CONCURRENCY、SANDBOX_GLOBAL_CONCURRENCY、SANDBOX_USER_CONCURRENCY、SANDBOX_QUEUE_LIMIT（默认50）、SANDBOX_WAIT_SECONDS（默认300）可配置。全局、实例与用户额度以PG为准，Runner本地Semaphore只作保护；参数改变后重创建相关服务。节点重启只清理本runner_id归属实例，跨主机部署未经实测，不据有限验收宣称无限扩容。
 
 只有可信Runner挂载Docker socket；api/worker/任务容器无socket，模型不能选择镜像、宿主路径或网络。Runner控制接口只在内部网络，旧POST /jobs诊断入口仅供持控制令牌的验收驱动，正常Agent走PG队列；固定任务和资源模板相同。普通Docker共享宿主内核，本阶段不安装gVisor或使用Windows现有Python执行用户代码。
 
@@ -346,6 +346,67 @@ docker compose --profile production up -d --wait --wait-timeout 300
 
 附件增量修复使用 `012_message_files.sql`，旧附件关联到首次实际发送消息，保留历史正文与引用。定向回归 `test_attachment_regression.LinkFiles.test_links_are_inert_strings` 和 `test_attachment_regression.ConversationFiles.test_sent_files_survive_other_turns` 验证超链接、未发送草稿不可见及真实模型跨轮转换原件；浏览器检查概况/全文/长执行输出展开后聊天与面板宽度稳定。
 
+## M07C 多 worker、多 Runner 与排空缩容
+
+版本0.7.3。worker共享Agent/知识队列，以随机worker_id和PG租约原子领取，两个队列有界交替；不绑定某个Runner。默认2个worker、每实例2槽。Runner以容器HOSTNAME取得独立runner_id，每次启动生成instance_id，注册心跳/镜像/解析器能力后才领取。沙箱全局/节点/单用户额度在PG同一事务中判断；满额保持queued，释放容量后自动继续，不返回“沙箱忙碌”来取消正常任务。
+
+新增013迁移保存sandbox_nodes及资源释放状态。控制服务先独占节点身份，再仅清理本归属孤儿；节点失联标unknown，保留可能仍在占用的额度，直到原节点确认关闭或受控恢复入口实际清理。旧代次/旧租约回执不能覆盖终态，重复通知不生成第二份结果。业务SQL依然必须人工确认，多worker不会重新执行未知SQL。
+
+同一Linux Docker引擎部署或升级：
+
+```sh
+docker compose --profile tools build api sandbox-runner sandbox-image
+docker compose --profile tools run --rm db-admin migrate
+docker compose up -d --wait
+```
+
+实例数由.env的WORKER_REPLICAS/SANDBOX_RUNNER_REPLICAS配置，或临时显式扩容：
+
+```sh
+docker compose up -d --no-deps --wait --scale worker=3 --scale sandbox-runner=3 worker sandbox-runner
+```
+
+增加Runner副本不会自动增加全局预算；需要更多实际任务并行时同步设置SANDBOX_GLOBAL_CONCURRENCY及SANDBOX_USER_CONCURRENCY，再重建相关服务配置。保持SANDBOX_RUNNER_ID留空，让每个副本使用自身身份；复制同一固定节点名会被注册接口拒绝。SANDBOX_RUNNER_URL保留用于可信诊断，实际任务调度及能力发现使用共享PG节点目录，不依靠DNS选择执行节点。
+
+缩容发送SIGTERM后先停止领取，worker最多等待WORKER_SHUTDOWN_SECONDS（默认60秒），Runner最多等待SANDBOX_SHUTDOWN_SECONDS（默认70秒），继续为活动任务续租并保存结果；超时明确中断/未知并清理，不静默重放。Compose分别提供75/110秒停止宽限；增加等待参数时也要调大stop_grace_period。
+
+```sh
+docker compose up -d --no-deps --wait --scale worker=1 --scale sandbox-runner=1 worker sandbox-runner
+```
+
+节点崩溃先重启原控制器，由它复核/清理自己的孤儿。若原控制器已经被删除，用明确的旧runner_id运行一次恢复；该入口拒绝仍在心跳的活节点，只关闭旧归属，不领取任务、不重跑代码：
+
+```sh
+docker compose run --rm --no-deps -e SANDBOX_RUNNER_ID=旧节点编号 --entrypoint python sandbox-runner /app/recover_node.py
+```
+
+内部鉴权的/internal/sandbox/status提供有限节点/容量/队列指标，不包含代码/文件/凭证；审计UI留在M12。验收入口sh scripts/verify-m07c.sh：同批10个固定沙箱任务在双/单Runner分别执行，双节点峰值2执行/8排队、单节点峰值1执行/9排队，均10/10完成且结果一致。另验证两真实主/审核模型任务及跨worker接续、运行/排队取消、节点重启不误清理、过期节点恢复、旧回执和SQL租约守卫；测试使用独立PG与虚构文件，报告在verification/M07C/REPORT.md，不重复格式/压力矩阵。可信验收驱动为创建/重启临时副本持有Docker socket，普通api/worker与用户任务客体没有该socket。
+
+Windows可以直接在项目根目录执行相同的Docker验收入口，不需要宿主安装Python测试依赖：
+
+```powershell
+docker compose --profile tools run --rm --no-deps --user 0:0 --entrypoint python -v /var/run/docker.sock:/var/run/docker.sock -v "${PWD}/backend/tests:/tests:ro" -v "${PWD}/verification:/verification" -e PYTHONPATH=/app:/tests db-admin -m unittest test_m07c.Scaling test_m07c.RecoveryFence.test_expired_confirmed_run_claimed_once test_m07b.FileFlow.test_changed_input_unknown_and_attempt_budget test_m07.M07Flow.test_wait_approve_reject_isolation_and_exact_payload test_answer_review.ReviewFlow.test_backend_rejects_false_approval -v
+```
+
+实测为Docker Desktop的Linux/x86_64引擎，20逻辑CPU、约5.79GiB引擎内存；每个实际任务仍限制2CPU/1GiB/64进程，批次容量设2。仅验证同一引擎上的有限副本，跨主机/其他架构/任意规模未验收。
+
+### 在命令行实时观察并发
+
+实时入口为scripts/observe-m07c.ps1，Python实现在backend/tests/observe_m07c.py，复用test_m07c.py的隔离数据库与真实容器基础设施。与固定代码的沙箱容量验收不同，此入口默认提交10条真实模型对话，通过2个真实worker、2个Runner执行，使用现有主/审核模型配置。
+
+```powershell
+# 在项目根目录打开PowerShell运行，输出立即刷新，不必等待结束。
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\observe-m07c.ps1
+
+# 先看两条任务，或放慢客体执行以观察排队（每次执行额外等待5秒）。
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\observe-m07c.ps1 -Tasks 2
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\observe-m07c.ps1 -Tasks 10 -TaskDelaySeconds 5
+```
+
+运行前主Compose服务需已启动。无需宿主Python依赖，脚本在Docker中执行；此模式真实调用配置的主/审核模型。日志显示A01等对话编号、J01等沙箱任务编号、真实Worker1/2身份、共享队列提交、Runner1/2领取、任务容器创建/运行/实际销毁、主/审核模型阶段、当前Agent/沙箱等待及执行列表，最后下载真实CSV核对数值并汇总。领取/恢复从PG审计读取，排队列表从PG状态读取，容器从Docker读取；不打印凭证、代码、文件正文或隐藏思考。启动心跳身份未绑定时先显示实际worker ID，绑定后输出对应名称；领取审计会补读，不猜测归属。
+
+Worker不会直接选定Runner；输出明确展示“worker→共享沙箱队列→空闲Runner领取”。同一次对话可能产生附件预处理、详细读取和代码执行多个J任务，不把10条对话误称为仅10次容器执行。只在队列变化时打印列表，Ctrl+C会停止本次测试并清理临时环境，正式数据与服务保留。日志保存为verification/M07C/live-console-时间.log，数值及峰值证据保存为verification/M07C/run_demo.json。
+
 ## 未来待实现功能
 
 新阶段详见本地 docs/PRD.md、docs/DEVELOPMENT_PLAN.md 和 docs/ATTACHMENT_RUNTIME_DESIGN.md。文档按现有约定不随仓库分发；本节同时保存可随仓库阅读的实施摘要。
@@ -353,7 +414,6 @@ docker compose --profile production up -d --wait --wait-timeout 300
 M06A验收入口：`sh scripts/verify-m06a.sh` 执行4项边界测试、相关集成测试组及6项受影响回归；集成组覆盖真实RAG/公开/组合/直接回答、实际千问备用、故障状态，以及两路输入隔离和关键词生成后的轻量检查，使用独立测试库及检索集合，结果保存在本机 `verification/M06A/`。日常小改只运行受影响的目标用例，不重复整套M01～M06测试。浏览器脚本为 `scripts/verify-browser-m06a.ps1`，支持通过 `-Session <名称> -ReuseLoggedInSession` 复用已登录的隔离agent-browser会话；验收结束关闭本会话，登录配置由其创建者清理。
 
 - **后续隔离增强**：当前沙箱采用普通Docker容器，共享宿主内核；gVisor/runsc或微虚拟机属于未来可选增强，本阶段不安装、不要求，不将普通容器宣称为同等强隔离。
-- **M07C 多实例扩容**：多个worker共享Agent队列，多个Runner共享沙箱队列；在本阶段租约/归属基础上完善多实例部署、取消/失联/扩缩容与有限并发验收，提供配置及排空缩容，不引入Celery/Kafka或自动弹性平台。
 - **后续敏感动作扩展**：未来邮件/消息等真实外部发送可使用 Hook 展示目标和完整待发内容，本轮不实现发送工具。本人确认不能扩大权限，自动沙箱执行也不能访问真实业务数据库。
 - **上下文与长期记忆**：可重建的短期缓存、上下文压缩、按用户隔离的自动后台记忆。
 - **审计工作台与任务恢复**：基于已建立的永久审计，实现管理员只读调试、后台任务恢复、备份与恢复验证。
@@ -366,10 +426,14 @@ docker compose --profile tools run --rm --no-deps --entrypoint python -v "${PWD}
 
 真实用例仅使用独立测试库内明确虚构的制度及公开IQS资料，不读取主库。结果保存在 `verification/answer-review/`；失败夹具覆盖返工上限、引用误放行、审核配置/鉴权/协议/重试和取消，不能当作真实模型成功证据。日常局部修改选择受影响的方法执行。
 
-M07B 已完成，后续顺序为 M07C 多 worker/多 Runner 扩容 → M10 上下文压缩 → M11 自动记忆 → M12 审计与交付回归。原 M08/M09 阶段已删除，不复用原编号。先稳定附件与任务回执，再处理多实例恢复，后续缓存/记忆复用这些契约，减少调度返工。
+M07C 已完成，后续顺序为 M10 上下文压缩 → M11 自动记忆 → M12 审计与交付回归。原 M08/M09 阶段已删除，不复用原编号。后续缓存/记忆复用已建立的附件、任务回执和多实例租约契约。
 
 M07验收入口：`sh scripts/verify-m07.sh`，仅运行5个本阶段目标组、1个实际模型/PG用例及2个受影响的审核/RAG守卫。真实用例只使用独立测试库内外置虚构种子，输出在本地 `verification/M07/`。升级现有部署先执行 `docker compose --profile tools run --rm db-admin migrate` 应用008/009增量；新增代码提交模拟数据需执行 `docker compose --profile tools run --rm db-admin seed`（只导入未应用的005种子，已应用种子跳过），再更新api/worker；不修改旧迁移/种子、不重建数据卷。
 
 当前文件代码自动执行，业务SQL确认保留；首次附件概况与详细读取、真实执行和产物均参与事实/独立模型审核。publish仅作最终权限/引用/交付检查，不再因无RAG引用覆盖有效计算/转换答案。Word首期指DOCX，PDF只提取文字，不接图片/音视频/OCR、旧DOC、宏/加密文件；复杂PDF表格或排版不能保证完全还原。源码/编排版本0.7.2，本次实测Docker Desktop的Linux amd64引擎，其他平台/多实例尚需对应验收。
 
 自动化任务流当前仅保留导航入口，具体配置与执行能力留待后续版本。每次更新代码时同步维护本 README 中的当前功能、启动步骤及待实现功能，使说明与实际版本一致。
+
+### 大附件与模型上下文的边界
+
+20MiB是单附件上传字节上限，不是全文可输入模型的保证，DOCX/XLSX/PDF解包或抽取后可能显著增大。当前固定解析器限制文本200万字符、PDF300页、表格100万单元格或20万行；超过解析限制会说明失败，不自动截尾后声称已读完。首次预处理：文本不超过1800字符提供全文，长文本提供长度/结构及前1400字符；表格提供工作表、列类型/缺失量及前三行样例。大量工作表的概况仍可能变大，目前没有全局概况token裁剪。详细工具分页读取文本最多12000字符或表格20行/20列；代码可在沙箱直接处理原件，只把有界结果和产物回执传给模型。当前没有超大文档分块递归总结、自动语义压缩或全文检索索引；分页结果累计超窗仍会明确停止，不保证任意20MiB文档的完整总结。

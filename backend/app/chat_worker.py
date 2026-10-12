@@ -26,14 +26,14 @@ logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(messa
 logging.getLogger('httpx').setLevel(logging.WARNING)
 
 
-async def heartbeat(settings, pool, audit, stopping: asyncio.Event):
-    """接收配置、连接池、审计和停止事件，持续保存北京时间心跳及真实依赖状态；停止后返回。"""
+async def heartbeat(settings, pool, audit, stopping: asyncio.Event, worker_id: str):
+    """接收settings/pool/audit、停止事件及本副本worker_id，保存时间/容量/依赖心跳；停止后返回无任务结果。"""
     events,trace_id = InfrastructureEvents(),new_id()
     path,previous = Path(settings.worker_state_path),None
-    await audit.append(trace_id,'service.started',{'service':'worker','milestone':'M07B'})
+    await audit.append(trace_id,'service.started',{'service':'worker','milestone':'M07C','worker_id':worker_id,'capacity':settings.worker_concurrency})
     while not stopping.is_set():
         results = await check_dependencies(settings)
-        state = {'timestamp':beijing_now().isoformat(),'pid':os.getpid(),'ready':all(item.status=='ready' for item in results.values()),
+        state = {'timestamp':beijing_now().isoformat(),'pid':os.getpid(),'worker_id':worker_id,'capacity':settings.worker_concurrency,'ready':all(item.status=='ready' for item in results.values()),
                  'dependencies':{name:item.status for name,item in results.items()}}
         temporary = path.with_suffix('.tmp')
         temporary.write_text(json.dumps(state),encoding='utf-8')
@@ -60,14 +60,16 @@ async def run():
     storage = KnowledgeStorage(settings)
     rag = RagService(pool,settings,index,storage,audit)
     web = WebSearchService(pool,settings,audit)
-    processor = ChatProcessor(pool,settings,gateway,audit,rag=rag,web=web)
-    knowledge = KnowledgeProcessor(pool,settings,storage,audit,KnowledgeIndexer(pool,settings,index,audit))
+    # 同一副本的两类队列使用同一随机身份，重启生成新身份；PG租约阻止旧副本写回。
+    worker_id=new_id()
+    processor = ChatProcessor(pool,settings,gateway,audit,worker_id=worker_id,rag=rag,web=web)
+    knowledge = KnowledgeProcessor(pool,settings,storage,audit,KnowledgeIndexer(pool,settings,index,audit),worker_id=worker_id)
     await queue_existing_approved(pool,knowledge)
     stopping = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM,signal.SIGINT):
         loop.add_signal_handler(signum,stopping.set)
-    health_task = asyncio.create_task(heartbeat(settings,pool,audit,stopping))
+    health_task = asyncio.create_task(heartbeat(settings,pool,audit,stopping,worker_id))
     # 执行集合只负责本进程调度，真实任务和租约始终保存在 PG。
     tasks = set()
     # 两个队列交替优先，持续聊天不会饿死知识解析；共用既有并发上限。
@@ -98,7 +100,10 @@ async def run():
                 pass
     finally:
         stopping.set()
-        for task in tasks:
+        # SIGTERM后停止领取，保持续租并有限等待活动任务；超时走现有中断守卫，不能自动重发SQL。
+        pending=set()
+        if tasks:_,pending=await asyncio.wait(tasks,timeout=settings.worker_shutdown_seconds)
+        for task in pending:
             task.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
         health_task.cancel()

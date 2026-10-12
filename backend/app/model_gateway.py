@@ -38,6 +38,8 @@ class ModelSlot:
     key: str = field(repr=False)
     model: str = ""
     context_tokens: int = 0
+    # 安全比例由运行配置传入；所有请求阶段共享同一预算边界。
+    context_safety_ratio: float = 0.95
 
     @property
     def provider(self) -> str:
@@ -51,8 +53,16 @@ class ModelSlot:
 
     @property
     def window(self) -> int:
-        """无参数，返回槽位窗口配置或保守能力目录下限，不冒充型号的最大宣传窗口。"""
-        return self.context_tokens or (32768 if self.provider in ("deepseek","qwen") else 8192)
+        """无参数，返回显式窗口或已核对型号的窗口；未知型号保留保守值，避免按厂商一概扩大。"""
+        # 2026-10-12核对官方型号说明；代理服务如有更小限制，应显式配置槽位窗口。
+        known_windows = {'deepseek-flash':1_000_000,'qwen3.7-flash':1_000_000,
+                         'qwen3.7-flash-2026-07-15':1_000_000,'qwen3.8-flash':1_000_000}
+        return self.context_tokens or known_windows.get(self.model.lower(),32768 if self.provider in ("deepseek","qwen") else 8192)
+
+    @property
+    def safe_limit(self) -> int:
+        """无参数，返回输入与输出合计的安全上限，供历史、工具循环及审核统一使用。"""
+        return int(self.window*self.context_safety_ratio)
 
     def endpoint(self) -> str:
         """无参数，验证配置并返回 Chat Completions 地址；非法槽位在发送 HTTP 前明确失败。"""
@@ -146,10 +156,10 @@ class ModelGateway:
     def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None):
         """接收配置和可选测试 HTTP 客户端，建立主备槽位及独立熔断状态，不发送请求。"""
         self.settings = settings
-        self.slots = [ModelSlot("primary",settings.primary_base_url,settings.primary_api_key.get_secret_value(),settings.primary_model,settings.primary_context_tokens),
-                      ModelSlot("fallback",settings.fallback_base_url,settings.fallback_api_key.get_secret_value(),settings.fallback_model,settings.fallback_context_tokens)]
+        self.slots = [ModelSlot("primary",settings.primary_base_url,settings.primary_api_key.get_secret_value(),settings.primary_model,settings.primary_context_tokens,settings.model_context_safety_ratio),
+                      ModelSlot("fallback",settings.fallback_base_url,settings.fallback_api_key.get_secret_value(),settings.fallback_model,settings.fallback_context_tokens,settings.model_context_safety_ratio)]
         # 审核使用独立槽位和熔断状态；即使URL/密钥相同也不与备用槽位耦合。
-        self.review_slot = ModelSlot("review",settings.review_base_url,settings.review_api_key.get_secret_value(),settings.review_model,settings.review_context_tokens)
+        self.review_slot = ModelSlot("review",settings.review_base_url,settings.review_api_key.get_secret_value(),settings.review_model,settings.review_context_tokens,settings.model_context_safety_ratio)
         self.owns_client = client is None
         self.client = client or httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(retries=0),trust_env=False,
             timeout=httpx.Timeout(settings.model_read_timeout_seconds,connect=10),follow_redirects=False)
@@ -250,7 +260,7 @@ class ModelGateway:
         metadata = {"attempt_id":attempt_id,"slot":slot.role,"provider":slot.provider,"model":slot.model,"attempt":number}
         # 网关统一复核实际消息和工具预算，独立公开关键词等调用也不会绕过窗口检查。
         counted=count_request(body['messages'],body.get('tools'),slot.model)
-        budget={'input_tokens':counted.count,'output_reserved':self.settings.model_output_tokens,'window':slot.window,'safe_limit':int(slot.window*0.8),
+        budget={'input_tokens':counted.count,'output_reserved':self.settings.model_output_tokens,'window':slot.window,'safe_limit':slot.safe_limit,
                 'method':counted.method,'tokenizer':counted.tokenizer,'source':'estimated'}
         if counted.count+self.settings.model_output_tokens>budget['safe_limit']:
             await audit('model.budget_rejected',{**metadata,'budget':budget},None)

@@ -100,6 +100,16 @@ class FileFlow(unittest.IsolatedAsyncioTestCase):
         self.settings=self.settings.model_copy(update={name:getattr(self.actual,name) for name in names}|{'sandbox_enabled':True,'primary_context_tokens':65536,'fallback_context_tokens':65536,'review_context_tokens':65536})
         self.api.app.state.settings=self.settings;self.storage=KnowledgeStorage(self.settings);self.api.app.state.knowledge_storage=self.storage
         self.node=httpx.AsyncClient(timeout=85,trust_env=False);self.control_headers={'Authorization':'Bearer '+self.actual.sandbox_control_token.get_secret_value()}
+        # 隔离测试API注册自己的诊断领取代次，不冒用主库节点身份。
+        self.test_node='verify-'+new_id();self.test_instance=new_id()
+        await self.register_node()
+
+    async def register_node(self,capacity=2):
+        """接收诊断容量，把真实Runner能力登记到本测试独立库；返回固定节点身份。"""
+        health=(await self.node.get(self.actual.sandbox_runner_url+'/health',headers=self.control_headers)).json()
+        response=self.api.post('/internal/sandbox/nodes/heartbeat',headers=self.control_headers,json={
+            'runner_id':self.test_node,'instance_id':self.test_instance,'capacity':capacity,'manifest':health})
+        self.assertEqual(response.status_code,200,response.text);return health
 
     async def asyncTearDown(self):
         """只删除本测试数据库/对象，保存无密钥证据；节点控制诊断不修改其他任务。"""
@@ -123,15 +133,15 @@ class FileFlow(unittest.IsolatedAsyncioTestCase):
 
     async def claim_job(self, capacity=2):
         """测试调度驱动调用生产领取接口；返回可信packet，真实用户路径由Runner后台自动驱动。"""
-        health=(await self.node.get(self.actual.sandbox_runner_url+'/health',headers=self.control_headers)).json()
-        response=self.api.post('/internal/sandbox/claim',headers=self.control_headers,json={'runner_id':'sandbox-runner-1','capacity':capacity,'image_id':health['image_id']})
+        health=await self.register_node(capacity)
+        response=self.api.post('/internal/sandbox/claim',headers=self.control_headers,json={'runner_id':self.test_node,'instance_id':self.test_instance,'capacity':capacity,'image_id':health['image_id']})
         self.assertEqual(response.status_code,200,response.text);return response.json()['job']
 
     async def complete_job(self, job):
         """接收生产队列领取包，实际跑独立Docker，再调用生产持久回执接口，不用固定假结果。"""
         response=await self.node.post(self.actual.sandbox_runner_url+'/jobs/'+job['job_id'],headers=self.control_headers,json=job)
         self.assertEqual(response.status_code,200,response.text);receipt=response.json()
-        response=self.api.post('/internal/sandbox/jobs/'+job['job_id']+'/complete',headers=self.control_headers,json={'runner_id':'sandbox-runner-1','lease_version':job['lease_version'],'receipt':receipt})
+        response=self.api.post('/internal/sandbox/jobs/'+job['job_id']+'/complete',headers=self.control_headers,json={'runner_id':self.test_node,'instance_id':self.test_instance,'lease_version':job['lease_version'],'receipt':receipt})
         self.assertEqual(response.status_code,200,response.text);self.assertTrue(response.json()['saved'])
         self.evidence.append({'job_id':job['job_id'],'operation':job['operation'],'receipt_ok':receipt['ok']})
 
@@ -238,14 +248,29 @@ class FileFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.admin.fetchval('SELECT status FROM app_runtime.sandbox_jobs WHERE job_id=$1',ident),'unknown')
         repeated=await processor.sandbox.execute(args,context,run,call,writer)
         self.assertEqual(repeated['error']['code'],'SANDBOX_RESULT_UNKNOWN');self.assertIsNone(await self.claim_job())
+        # 未知任务仍持有额度；模拟本诊断节点确认已经关闭客体后，旧回执只释放资源，不恢复成功。
+        late=self.api.post('/internal/sandbox/jobs/'+ident+'/complete',headers=self.control_headers,json={
+            'runner_id':self.test_node,'instance_id':self.test_instance,'lease_version':job['lease_version'],'receipt':{'ok':False,'artifacts':[]}})
+        self.assertFalse(late.json()['saved'])
+        with self.assertRaises(Exception) as uncertain:await submit()
+        self.assertEqual(uncertain.exception.detail['code'],'SANDBOX_RESULT_UNKNOWN')
+        # 新的人类请求可以继续；与旧未知任务分开，用明确失败的预算夹具保留三次尝试边界。
+        await writer.finish('interrupted',{'code':'SANDBOX_RESULT_UNKNOWN','message':'旧回执未知，不自动重跑'})
+        response=self.api.post('/api/conversations/'+conversation+'/messages',headers=headers,json={'content':'新的固定尝试预算测试','request_key':new_id()})
+        self.assertEqual(response.status_code,202,response.text)
+        run=await processor.claim();writer=RunWriter(self.pool,self.audit,run)
+        for _ in range(2):
+            fixture_call=new_id();fixture_job=new_id()
+            await self.admin.execute("INSERT INTO app_runtime.tool_calls(call_id,run_id,tool_name,input_json,status,idempotency_key) VALUES($1,$2,'run_sandbox_code','{}','failed',$3)",fixture_call,run['run_id'],new_id())
+            await self.admin.execute("INSERT INTO app_runtime.sandbox_attempts(attempt_id,call_id,run_id,user_id,operation,status,request_fingerprint,input_json,node_policy) VALUES($1,$2,$3,$4,'execute','failed','budget-fixture','{}','{}')",fixture_job,fixture_call,run['run_id'],run['user_id'])
         _,third=await submit();await self.complete_job(await self.claim_job())
         call=new_id();await self.admin.execute("INSERT INTO app_runtime.tool_calls(call_id,run_id,tool_name,input_json,status,idempotency_key) VALUES($1,$2,'run_sandbox_code','{}','running',$3)",call,run['run_id'],new_id())
         with self.assertRaises(Exception) as limit:await processor.sandbox.execute(args,context,run,call,writer)
         self.assertEqual(limit.exception.detail['code'],'SANDBOX_ATTEMPT_LIMIT')
-        self.assertEqual(self.api.post('/internal/sandbox/claim',json={'runner_id':'forged'}).status_code,401)
+        self.assertEqual(self.api.post('/internal/sandbox/claim',json={'runner_id':'forged','instance_id':new_id()}).status_code,401)
         unsupported=self.api.post('/api/conversations/'+conversation+'/attachments',headers=headers,files=[('files',('image.png',b'not an allowed attachment'))])
         self.assertEqual(unsupported.status_code,422)
-        unavailable=SandboxService(self.pool,self.settings.model_copy(update={'sandbox_runner_url':self.actual.sandbox_runner_url+'/unavailable'}),self.audit,None)
-        with self.assertRaises(Exception) as missing:await unavailable.health()
+        await self.admin.execute("UPDATE app_runtime.sandbox_nodes SET expires_at=now()-interval '1 second'")
+        with self.assertRaises(Exception) as missing:await processor.sandbox.health()
         self.assertEqual(missing.exception.detail['code'],'SANDBOX_UNAVAILABLE')
         self.evidence.append({'input_changed_no_execution':True,'unknown_not_reexecuted':True,'attempt_budget':3,'fourth_rejected':True})

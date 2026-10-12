@@ -20,6 +20,7 @@ class NodeBody(BaseModel):
     """可信Runner的领取/续租字段，严格限制名称、容量与实际领取版本。"""
     model_config=ConfigDict(extra='forbid')
     runner_id: str=Field(pattern=r'^[A-Za-z0-9_-]{1,64}$')
+    instance_id: ShortId
     capacity: int=Field(default=2,ge=1,le=16)
     image_id: str=Field(default='',max_length=100)
     lease_version: int=Field(default=0,ge=0)
@@ -28,6 +29,66 @@ class NodeBody(BaseModel):
 class CompletionBody(NodeBody):
     """任务完成回执只来自可信控制器，原始代码不能调用此接口或持有控制令牌。"""
     receipt: dict
+
+
+class HeartbeatBody(NodeBody):
+    """接收节点固定能力与排空状态；启动清理完成后才开放领取，不接受模型提交。"""
+    manifest: dict
+    draining: bool=False
+    cleaned: bool=False
+
+
+@router.post('/nodes/heartbeat')
+async def node_heartbeat(body: HeartbeatBody,request: Request,authorization: str=Header(default='')):
+    """接收节点身份/能力/排空状态，原子注册及续期；活节点身份冲突拒绝，清理后释放旧代次额度。"""
+    authorize(request,authorization)
+    manifest=body.manifest
+    if not manifest.get('image_id') or manifest.get('policy',{}).get('network')!='none' or manifest.get('policy',{}).get('runtime')!='docker':
+        raise auth_error(422,'SANDBOX_NODE_POLICY','节点能力必须来自受限Docker模板')
+    async with request.app.state.pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute('SELECT pg_advisory_xact_lock(7100702)')
+            prior=await conn.fetchrow('SELECT *,expires_at>now() AS live FROM app_runtime.sandbox_nodes WHERE runner_id=$1 FOR UPDATE',body.runner_id)
+            if prior and prior['live'] and prior['instance_id']!=body.instance_id:raise auth_error(409,'SANDBOX_NODE_CONFLICT','Runner身份仍被其他启动代次占用')
+            await conn.execute('''INSERT INTO app_runtime.sandbox_nodes(runner_id,instance_id,capacity,manifest,draining)
+                VALUES($1,$2,$3,$4,$5) ON CONFLICT(runner_id) DO UPDATE SET instance_id=EXCLUDED.instance_id,
+                capacity=EXCLUDED.capacity,manifest=EXCLUDED.manifest,draining=EXCLUDED.draining,heartbeat_at=now(),expires_at=now()+interval '30 seconds' ''',
+                body.runner_id,body.instance_id,body.capacity,manifest,body.draining)
+            if body.cleaned:
+                # 新节点已清理本归属孤儿后，旧代次任务只能结束为未知，绝不能重跑或覆盖为成功。
+                jobs=await conn.fetch('''SELECT * FROM app_runtime.sandbox_jobs WHERE runner_id=$1
+                    AND node_instance_id IS DISTINCT FROM $2 AND NOT resources_released FOR UPDATE''',body.runner_id,body.instance_id)
+                for job in jobs:
+                    if job['status']=='running':await finish_error(conn,job,request.app.state.audit,'SANDBOX_RESULT_UNKNOWN','原执行节点重启，结果未知，不自动重跑','unknown',released=True)
+                    else:await conn.execute('UPDATE app_runtime.sandbox_jobs SET resources_released=true WHERE job_id=$1',job['job_id'])
+    return {'registered':True}
+
+
+@router.post('/nodes/stopped')
+async def node_stopped(body: NodeBody,request: Request,authorization: str=Header(default='')):
+    """接收已经排空的节点身份，立即关闭其容量；只允许本启动代次释放，不影响其他副本。"""
+    authorize(request,authorization)
+    async with request.app.state.pool.acquire() as conn:
+        value=await conn.fetchval('''UPDATE app_runtime.sandbox_nodes SET draining=true,expires_at=now()
+            WHERE runner_id=$1 AND instance_id=$2 RETURNING runner_id''',body.runner_id,body.instance_id)
+    return {'stopped':bool(value)}
+
+
+@router.get('/status')
+async def queue_status(request: Request,authorization: str=Header(default='')):
+    """接收控制鉴权，返回有限节点/队列/持有额度指标；不返回文件、代码、密钥或业务资料。"""
+    authorize(request,authorization)
+    async with request.app.state.pool.acquire() as conn:
+        nodes=await conn.fetch('SELECT runner_id,instance_id,capacity,draining,expires_at>now() AS live FROM app_runtime.sandbox_nodes ORDER BY runner_id')
+        jobs=await conn.fetch('SELECT status,count(*) AS count FROM app_runtime.sandbox_jobs GROUP BY status')
+        held=await conn.fetchval('SELECT count(*) FROM app_runtime.sandbox_jobs WHERE NOT resources_released')
+        loads=await conn.fetch('SELECT runner_id,count(*) AS held FROM app_runtime.sandbox_jobs WHERE NOT resources_released GROUP BY runner_id')
+    capacity=sum(row['capacity'] for row in nodes if row['live'] and not row['draining'])
+    by_node={row['runner_id']:row['held'] for row in loads}
+    free=sum(max(0,row['capacity']-by_node.get(row['runner_id'],0)) for row in nodes if row['live'] and not row['draining'])
+    return {'nodes':[dict(row) for row in nodes],'jobs':{row['status']:row['count'] for row in jobs},'held_slots':held,
+        'healthy_capacity':capacity,'global_limit':request.app.state.settings.sandbox_global_concurrency,
+        'available_slots':max(0,min(free,request.app.state.settings.sandbox_global_concurrency-held))}
 
 
 def authorize(request, value):
@@ -49,10 +110,11 @@ async def wake(conn, job, audit):
         await RunWriter(None,audit,dict(run)).append_event(conn,'sandbox.ready',{'message':'沙箱回执已保存，等待继续回答','status':'pending'})
 
 
-async def finish_error(conn, job, audit, code, message, status='failed'):
+async def finish_error(conn, job, audit, code, message, status='failed',released=None):
     """接收已锁任务和错误，保存有限回执并唤醒Agent；终态不能再次触发代码执行。"""
     output=error_output(code,message)
-    await conn.execute('UPDATE app_runtime.sandbox_jobs SET status=$1,result_json=$2,cancel_requested=true,finished_at=now(),updated_at=now() WHERE job_id=$3',status,output,job['job_id'])
+    released=job['resources_released'] if released is None else released
+    await conn.execute('UPDATE app_runtime.sandbox_jobs SET status=$1,result_json=$2,cancel_requested=true,resources_released=$4,finished_at=now(),updated_at=now() WHERE job_id=$3',status,output,job['job_id'],released)
     if job['call_id']:await conn.execute("UPDATE app_runtime.sandbox_attempts SET status=$1,result_json=$2,updated_at=now() WHERE attempt_id=$3",status,output,job['job_id'])
     run=await conn.fetchrow('SELECT trace_id FROM app_runtime.runs WHERE run_id=$1',job['run_id'])
     await audit.append(run['trace_id'],'sandbox.'+status,{'job_id':job['job_id'],'error':output['error']},user_id=job['user_id'],run_id=job['run_id'],connection=conn)
@@ -86,23 +148,23 @@ async def claim(body: NodeBody, request: Request, authorization: str=Header(defa
         async with conn.transaction():
             # 全局领取锁协调总额度与同用户执行数；本地Semaphore不是共享真源。
             await conn.execute('SELECT pg_advisory_xact_lock(7100702)')
+            node=await conn.fetchrow('''SELECT * FROM app_runtime.sandbox_nodes WHERE runner_id=$1 AND instance_id=$2
+                AND expires_at>now() AND NOT draining''',body.runner_id,body.instance_id)
+            if node is None or node['capacity']!=body.capacity or node['manifest']['image_id']!=body.image_id:return {'job':None}
             # total是共享队列中已领取的执行数量，保证所有节点共用全局上限。
-            total=await conn.fetchval("SELECT count(*) FROM app_runtime.sandbox_jobs WHERE status='running'")
+            total=await conn.fetchval("SELECT count(*) FROM app_runtime.sandbox_jobs WHERE NOT resources_released")
             # local是该Runner持有的额度，与全局额度分别检查。
-            local=await conn.fetchval("SELECT count(*) FROM app_runtime.sandbox_jobs WHERE status='running' AND runner_id=$1",body.runner_id)
+            local=await conn.fetchval("SELECT count(*) FROM app_runtime.sandbox_jobs WHERE NOT resources_released AND runner_id=$1",body.runner_id)
             if total>=settings.sandbox_global_concurrency or local>=body.capacity:return {'job':None}
             job=await conn.fetchrow('''SELECT j.* FROM app_runtime.sandbox_jobs j JOIN app_runtime.runs r USING(run_id)
                 WHERE j.status='queued' AND NOT j.cancel_requested AND j.expires_at>now() AND NOT r.cancel_requested
-                AND r.status IN ('running','waiting_sandbox') AND NOT EXISTS(
-                    SELECT 1 FROM app_runtime.sandbox_jobs active WHERE active.user_id=j.user_id AND active.status='running')
-                ORDER BY j.created_at,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT 1''')
+                AND r.status IN ('running','waiting_sandbox') AND j.node_policy->>'image_id'=$1 AND j.node_policy->'policy'=$2 AND j.node_policy->>'parser_version'=$4
+                AND (SELECT count(*) FROM app_runtime.sandbox_jobs active WHERE active.user_id=j.user_id AND NOT active.resources_released)<$3
+                ORDER BY j.created_at,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT 1''',body.image_id,node['manifest']['policy'],settings.sandbox_user_concurrency,node['manifest']['parser_version'])
             if job is None:return {'job':None}
             run=await conn.fetchrow('SELECT * FROM app_runtime.runs WHERE run_id=$1',job['run_id'])
-            if job['node_policy']['image_id']!=body.image_id:
-                await finish_error(conn,job,request.app.state.audit,'SANDBOX_POLICY_CHANGED','排队期间镜像变化，请重新发起任务')
-                return {'job':None}
             version=job['lease_version']+1
-            await conn.execute("UPDATE app_runtime.sandbox_jobs SET status='running',runner_id=$1,lease_version=$2,lease_until=now()+interval '30 seconds',started_at=now(),updated_at=now() WHERE job_id=$3",body.runner_id,version,job['job_id'])
+            await conn.execute("UPDATE app_runtime.sandbox_jobs SET status='running',runner_id=$1,node_instance_id=$4,resources_released=false,lease_version=$2,lease_until=now()+interval '30 seconds',started_at=now(),updated_at=now() WHERE job_id=$3",body.runner_id,version,job['job_id'],body.instance_id)
             if job['call_id']:await conn.execute("UPDATE app_runtime.sandbox_attempts SET status='running' WHERE attempt_id=$1",job['job_id'])
             await request.app.state.audit.append(run['trace_id'],'sandbox.claimed',{'job_id':job['job_id'],'runner_id':body.runner_id,'lease_version':version},user_id=job['user_id'],run_id=job['run_id'],connection=conn)
     try:
@@ -121,7 +183,7 @@ async def claim(body: NodeBody, request: Request, authorization: str=Header(defa
         async with pool.acquire() as conn:
             async with conn.transaction():
                 current=await conn.fetchrow('SELECT * FROM app_runtime.sandbox_jobs WHERE job_id=$1 FOR UPDATE',job['job_id'])
-                if current['status']=='running':await finish_error(conn,current,request.app.state.audit,'ATTACHMENT_EVIDENCE_CHANGED','输入文件或身份已变化，本次没有执行代码')
+                if current['status']=='running':await finish_error(conn,current,request.app.state.audit,'ATTACHMENT_EVIDENCE_CHANGED','输入文件或身份已变化，本次没有执行代码',released=True)
         return {'job':None}
 
 
@@ -131,7 +193,8 @@ async def renew(job_id: ShortId, body: NodeBody, request: Request, authorization
     authorize(request,authorization)
     async with request.app.state.pool.acquire() as conn:
         row=await conn.fetchrow('SELECT j.*,r.state_json,r.cancel_requested AS run_cancel,r.status AS run_status FROM app_runtime.sandbox_jobs j JOIN app_runtime.runs r USING(run_id) WHERE job_id=$1',job_id)
-        if row is None or row['status']!='running' or row['runner_id']!=body.runner_id or row['lease_version']!=body.lease_version or row['cancel_requested'] or row['run_cancel'] or row['run_status'] in TERMINAL:return {'continue':False}
+        node=await conn.fetchval('SELECT 1 FROM app_runtime.sandbox_nodes WHERE runner_id=$1 AND instance_id=$2 AND expires_at>now()',body.runner_id,body.instance_id)
+        if not node or row is None or row['status']!='running' or row['runner_id']!=body.runner_id or row['node_instance_id']!=body.instance_id or row['lease_version']!=body.lease_version or row['cancel_requested'] or row['run_cancel'] or row['run_status'] in TERMINAL:return {'continue':False}
         try:await live_context(request.app.state.pool,row['user_id'],row['state_json']['auth_session_id'])
         except Exception:return {'continue':False}
         changed=await conn.fetchval("UPDATE app_runtime.sandbox_jobs SET lease_until=now()+interval '30 seconds',updated_at=now() WHERE job_id=$1 AND status='running' AND lease_version=$2 RETURNING job_id",job_id,body.lease_version)
@@ -148,16 +211,20 @@ async def complete(job_id: ShortId, body: CompletionBody, request: Request, auth
             async with conn.transaction():
                 job=await conn.fetchrow('SELECT * FROM app_runtime.sandbox_jobs WHERE job_id=$1 FOR UPDATE',job_id)
                 if job is None:raise auth_error(404,'NOT_FOUND','任务不存在')
-                if job['status'] in ('completed','failed') and job['runner_id']==body.runner_id and job['lease_version']==body.lease_version:return {'saved':True}
-                if job['status']!='running' or job['runner_id']!=body.runner_id or job['lease_version']!=body.lease_version:return {'saved':False}
+                if job['runner_id']!=body.runner_id or job['node_instance_id']!=body.instance_id or job['lease_version']!=body.lease_version:return {'saved':False}
+                if job['status'] in ('completed','failed','cancelled','unknown'):
+                    # 同一真实执行已销毁容器后的迟到通知可释放额度，但不能覆盖终态或再次唤醒。
+                    await conn.execute('UPDATE app_runtime.sandbox_jobs SET resources_released=true WHERE job_id=$1',job_id)
+                    return {'saved':job['status'] in ('completed','failed')}
+                if job['status']!='running':return {'saved':False}
                 run=await conn.fetchrow('SELECT * FROM app_runtime.runs WHERE run_id=$1 FOR UPDATE',job['run_id'])
                 if run['cancel_requested'] or run['status'] in TERMINAL:
-                    await finish_error(conn,job,request.app.state.audit,'SANDBOX_CANCELLED','任务已停止，迟到结果不恢复成功','cancelled');return {'saved':False}
+                    await finish_error(conn,job,request.app.state.audit,'SANDBOX_CANCELLED','任务已停止，迟到结果不恢复成功','cancelled',released=True);return {'saved':False}
                 await live_context(request.app.state.pool,job['user_id'],run['state_json']['auth_session_id'])
                 receipt=body.receipt
                 if not receipt.get('ok'):
                     error=receipt.get('error') or {'code':'SANDBOX_FAILED','message':'隔离执行未完成'}
-                    await finish_error(conn,job,request.app.state.audit,error['code'],error['message'],'unknown' if error['code']=='SANDBOX_RESULT_UNKNOWN' else 'failed')
+                    await finish_error(conn,job,request.app.state.audit,error['code'],error['message'],'unknown' if error['code']=='SANDBOX_RESULT_UNKNOWN' else 'failed',released=True)
                     return {'saved':True}
                 result_id=new_id();artifacts=[];total=0
                 for artifact in receipt.get('artifacts',[]):
@@ -175,7 +242,7 @@ async def complete(job_id: ShortId, body: CompletionBody, request: Request, auth
                     'citations':[{'type':'sandbox','result_id':result_id,'title':title,'content':json.dumps(value,ensure_ascii=False)[:14000]}]}
                 await conn.execute('INSERT INTO app_runtime.sandbox_results(result_id,attempt_id,job_id,user_id,conversation_id,result_json) VALUES($1,$2,$3,$4,$5,$6)',result_id,job_id if job['call_id'] else None,job_id,job['user_id'],run['conversation_id'],value)
                 for x in artifacts:await conn.execute('INSERT INTO app_runtime.sandbox_artifacts(artifact_id,result_id,filename,size_bytes,sha256,object_key) VALUES($1,$2,$3,$4,$5,$6)',x['artifact_id'],result_id,x['filename'],x['size_bytes'],x['sha256'],x['object_key'])
-                await conn.execute("UPDATE app_runtime.sandbox_jobs SET status='completed',result_json=$1,finished_at=now(),updated_at=now() WHERE job_id=$2",output,job_id)
+                await conn.execute("UPDATE app_runtime.sandbox_jobs SET status='completed',resources_released=true,result_json=$1,finished_at=now(),updated_at=now() WHERE job_id=$2",output,job_id)
                 if job['call_id']:await conn.execute("UPDATE app_runtime.sandbox_attempts SET status='completed',result_json=$1,updated_at=now() WHERE attempt_id=$2",output,job_id)
                 await request.app.state.audit.append(run['trace_id'],'sandbox.completed',{'job_id':job_id,'runner_id':body.runner_id,'output':output},user_id=job['user_id'],run_id=job['run_id'],connection=conn)
                 await wake(conn,job,request.app.state.audit)

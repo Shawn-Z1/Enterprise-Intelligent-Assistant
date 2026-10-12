@@ -194,6 +194,9 @@ class ChatProcessor:
             if row['state_json'].get('resume_action') and not row['state_json'].get('audit_pending'):
                 async with self.pool.acquire() as conn:
                     async with conn.transaction():
+                        # 多副本可能拿到同一过期快照；先锁住并复检当前租约，不能改新worker正在执行的确认动作。
+                        expired=await conn.fetchval("SELECT run_id FROM app_runtime.runs WHERE run_id=$1 AND status='running' AND lease_until<now() FOR UPDATE",row['run_id'])
+                        if not expired:continue
                         # 已领取但尚未保存回执的执行标未知；后续节点只能回填错误，不重发SQL。
                         await conn.execute("UPDATE app_runtime.query_approvals SET decision='unknown',execution_token_hash=NULL WHERE run_id=$1 AND decision='executing'",row['run_id'])
                         await conn.execute("UPDATE app_runtime.runs SET status='pending',lease_owner=NULL,lease_until=NULL WHERE run_id=$1 AND status='running' AND lease_until<now()",row['run_id'])

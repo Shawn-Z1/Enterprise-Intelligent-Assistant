@@ -60,7 +60,7 @@ def count_value(value, model: str='') -> TokenCount:
     """接收文本或结构化消息/工具及型号，分词后附加聊天格式预留，返回预算计数与可追溯方法。"""
     text=value if isinstance(value,str) else json.dumps(value,ensure_ascii=False,separators=(',',':'))
     counted=count_text(text,model)
-    # 服务端Chat Completions隐藏模板不可完整复现，保留固定协议开销及外层20%安全余量。
+    # 服务端Chat Completions隐藏模板不可完整复现，保留固定协议开销及槽位配置的安全余量。
     framing=64 + (8*len(value) if isinstance(value,list) else 0)
     method=counted.method+'_json_envelope' if counted.tokenizer!='unknown_model' else counted.method
     return TokenCount(counted.count+framing,method,counted.tokenizer)

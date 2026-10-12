@@ -40,14 +40,17 @@ x-backend-env: &backend-env
   WEB_SEARCH_PER_MINUTE: ${WEB_SEARCH_PER_MINUTE:-10}
   PRIMARY_CONTEXT_TOKENS: ${PRIMARY_CONTEXT_TOKENS:-0}
   FALLBACK_CONTEXT_TOKENS: ${FALLBACK_CONTEXT_TOKENS:-0}
-  MODEL_OUTPUT_TOKENS: ${MODEL_OUTPUT_TOKENS:-2048}
+  MODEL_CONTEXT_SAFETY_RATIO: ${MODEL_CONTEXT_SAFETY_RATIO:-0.95}
+  MODEL_OUTPUT_TOKENS: ${MODEL_OUTPUT_TOKENS:-4096}
   MODEL_READ_TIMEOUT_SECONDS: ${MODEL_READ_TIMEOUT_SECONDS:-45}
   MODEL_RETRY_BACKOFF_SECONDS: ${MODEL_RETRY_BACKOFF_SECONDS:-0.5}
   MODEL_CIRCUIT_FAILURES: ${MODEL_CIRCUIT_FAILURES:-3}
   MODEL_CIRCUIT_SECONDS: ${MODEL_CIRCUIT_SECONDS:-30}
   RUN_TIMEOUT_SECONDS: ${RUN_TIMEOUT_SECONDS:-240}
   WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+  WORKER_SHUTDOWN_SECONDS: ${WORKER_SHUTDOWN_SECONDS:-60}
   SANDBOX_GLOBAL_CONCURRENCY: ${SANDBOX_GLOBAL_CONCURRENCY:-2}
+  SANDBOX_USER_CONCURRENCY: ${SANDBOX_USER_CONCURRENCY:-1}
   SANDBOX_QUEUE_LIMIT: ${SANDBOX_QUEUE_LIMIT:-50}
   SANDBOX_WAIT_SECONDS: ${SANDBOX_WAIT_SECONDS:-300}
   RUN_LEASE_SECONDS: ${RUN_LEASE_SECONDS:-60}
@@ -89,15 +92,20 @@ services:
       dockerfile: guest.Dockerfile
     entrypoint: ["true"]
   sandbox-runner:
-    image: zhixing-sandbox-runner:0.7.2
+    image: zhixing-sandbox-runner:0.7.3
     build: ./services/sandbox-runner
     environment:
       SANDBOX_CONTROL_TOKEN: ${SANDBOX_CONTROL_TOKEN:?请初始化沙箱控制密钥}
       SANDBOX_TASK_IMAGE: zhixing-sandbox-guest:0.7.2
       SANDBOX_INPUT_VOLUME: zhixing-sandbox-inputs
       SANDBOX_API_URL: http://api:8000/internal/sandbox
-      SANDBOX_RUNNER_ID: sandbox-runner-1
-      SANDBOX_RUNNER_CONCURRENCY: ${SANDBOX_RUNNER_CONCURRENCY:-2}
+      # 未指定固定身份时使用容器自身HOSTNAME；副本不能共用runner_id。
+      SANDBOX_RUNNER_ID: ${SANDBOX_RUNNER_ID:-}
+      SANDBOX_RUNNER_CONCURRENCY: ${SANDBOX_RUNNER_CONCURRENCY:-1}
+      SANDBOX_SHUTDOWN_SECONDS: ${SANDBOX_SHUTDOWN_SECONDS:-70}
+    deploy:
+      replicas: ${SANDBOX_RUNNER_REPLICAS:-2}
+    stop_grace_period: 110s
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - sandbox-state:/var/lib/sandbox
@@ -167,7 +175,7 @@ services:
 
   api:
     build: ./backend
-    image: zhixing-backend:0.7.2
+    image: zhixing-backend:0.7.3
     environment: *backend-env
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
@@ -181,9 +189,12 @@ services:
     restart: unless-stopped
 
   worker:
-    image: zhixing-backend:0.7.2
+    image: zhixing-backend:0.7.3
     build: ./backend
     command: ["python", "-m", "app.worker"]
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+    stop_grace_period: 75s
     environment: *backend-env
     depends_on: *app-dependencies
     healthcheck:
@@ -197,7 +208,7 @@ services:
   # 显式管理任务：外置迁移和种子只读挂载，不在应用启动时自动导入。
   db-admin:
     profiles: ["tools"]
-    image: zhixing-backend:0.7.2
+    image: zhixing-backend:0.7.3
     build: ./backend
     entrypoint: ["python", "-m", "app.db_admin"]
     environment:
@@ -229,7 +240,8 @@ services:
       WEB_SEARCH_API_KEY: ${WEB_SEARCH_API_KEY:-}
       PRIMARY_CONTEXT_TOKENS: ${PRIMARY_CONTEXT_TOKENS:-0}
       FALLBACK_CONTEXT_TOKENS: ${FALLBACK_CONTEXT_TOKENS:-0}
-      MODEL_OUTPUT_TOKENS: ${MODEL_OUTPUT_TOKENS:-2048}
+      MODEL_CONTEXT_SAFETY_RATIO: ${MODEL_CONTEXT_SAFETY_RATIO:-0.95}
+      MODEL_OUTPUT_TOKENS: ${MODEL_OUTPUT_TOKENS:-4096}
       MODEL_READ_TIMEOUT_SECONDS: ${MODEL_READ_TIMEOUT_SECONDS:-45}
       MODEL_RETRY_BACKOFF_SECONDS: ${MODEL_RETRY_BACKOFF_SECONDS:-0.5}
       MODEL_CIRCUIT_FAILURES: ${MODEL_CIRCUIT_FAILURES:-3}

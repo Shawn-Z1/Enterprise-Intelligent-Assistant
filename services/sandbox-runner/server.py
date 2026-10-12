@@ -10,6 +10,7 @@ import math
 import os
 import re
 import shutil
+import secrets
 import tarfile
 import time
 import httpx
@@ -32,28 +33,72 @@ client=docker.from_env()
 active={}
 # 本实例容量只是本地保护；总额度和排队以PG控制接口为准。
 CAPACITY=int(os.environ.get('SANDBOX_RUNNER_CONCURRENCY','2'))
-RUNNER_ID=os.environ.get('SANDBOX_RUNNER_ID','sandbox-runner-1')
+RUNNER_ID=os.environ.get('SANDBOX_RUNNER_ID') or os.environ.get('HOSTNAME','sandbox-runner')
+# 固定节点身份在容器重启时保留；启动代次每次生成，用于租约写回隔离。
+INSTANCE_ID=secrets.token_urlsafe(12)
 API_URL=os.environ.get('SANDBOX_API_URL','http://api:8000/internal/sandbox')
+SHUTDOWN_SECONDS=int(os.environ.get('SANDBOX_SHUTDOWN_SECONDS','70'))
+stopping=asyncio.Event()
+# 注册与清理成功之前不接任务；排空只关闭新领取，活动任务继续续租。
+draining=True
+ready=False
+node_manifest={}
 if not 1<=CAPACITY<=16 or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',RUNNER_ID):raise RuntimeError('Runner名称或容量配置非法')
 slots=asyncio.Semaphore(CAPACITY)
 
 
 @asynccontextmanager
 async def lifespan(app):
-    """启动清理本项目标记的孤儿容器/输入，退出停止活动实例；不清理应用原件或产物。"""
+    """先独占注册本节点代次再清理自己的孤儿；退出停止领取并排空，不触碰其他副本的容器或输入。"""
+    global ready,draining,node_manifest
     ROOT.mkdir(exist_ok=True);INPUTS.mkdir(exist_ok=True)
+    node_manifest=await manifest()
+    async with httpx.AsyncClient(timeout=10,trust_env=False) as api:
+        while True:
+            try:
+                await register(api,True);break
+            except httpx.HTTPError:await asyncio.sleep(1)
+        maintenance=asyncio.create_task(maintain_node(api))
+        try:
+            await asyncio.to_thread(cleanup_owned)
+            draining=False;await register(api,False,cleaned=True);ready=True
+            driver=asyncio.create_task(queue_driver())
+            try:yield
+            finally:
+                draining=True
+                try:await register(api,True)
+                except httpx.HTTPError:pass
+                stopping.set();await driver
+                ready=False
+                try:await api.post(API_URL+'/nodes/stopped',headers=HEADERS,json={'runner_id':RUNNER_ID,'instance_id':INSTANCE_ID})
+                except httpx.HTTPError:pass
+        finally:
+            maintenance.cancel();await asyncio.gather(maintenance,return_exceptions=True)
+
+
+def cleanup_owned():
+    """无参数仅清理已独占身份的本节点旧容器/输入；持久回执和其他节点文件保持不变。"""
     for container in client.containers.list(all=True,filters={'label':['zhixing.sandbox=task','zhixing.runner='+RUNNER_ID]}):container.remove(force=True,v=True)
     (INPUTS/RUNNER_ID).mkdir(exist_ok=True)
     (ROOT/RUNNER_ID).mkdir(exist_ok=True)
     for folder in (INPUTS/RUNNER_ID).iterdir():
         if folder.is_dir() and not folder.is_symlink() and re.fullmatch(r'[A-Za-z0-9_-]{8,32}',folder.name):shutil.rmtree(folder)
-    driver=asyncio.create_task(queue_driver())
-    yield
-    driver.cancel();await asyncio.gather(driver,return_exceptions=True)
-    for entry in list(active.values()):
-        if entry.get('instance'):
-            try:entry['instance'].remove(force=True,v=True)
-            except docker.errors.NotFound:pass
+
+
+async def register(api, is_draining, cleaned=False):
+    """接收私有客户端、排空状态及实际清理完成标记，续期当前代次；成功无返回值，身份冲突抛错而不抢占。"""
+    response=await api.post(API_URL+'/nodes/heartbeat',headers=HEADERS,json={
+        'runner_id':RUNNER_ID,'instance_id':INSTANCE_ID,'capacity':CAPACITY,'manifest':node_manifest,'draining':is_draining,'cleaned':cleaned})
+    response.raise_for_status()
+
+
+async def maintain_node(api):
+    """接收私有客户端，每五秒续期节点；失联停止新领取，任务自身续租失败则销毁客体。"""
+    global ready
+    while True:
+        await asyncio.sleep(5)
+        try:await register(api,draining);ready=not draining
+        except httpx.HTTPError:ready=False
 
 
 app=FastAPI(lifespan=lifespan)
@@ -68,13 +113,19 @@ def authorize(value):
 async def health(authorization: str=Header(default='')):
     """检查Docker及固定分析镜像是否存在，返回镜像内容ID/模板；缺失时拒绝开放执行工具。"""
     authorize(authorization)
+    if not ready:raise HTTPException(503,'节点正在初始化、排空或控制连接失效')
+    return node_manifest|{'ready':ready,'active':len(active),'draining':draining}
+
+
+async def manifest():
+    """无参数核对固定镜像/Linux资源限制，返回本节点能力；能力入PG但不含应用凭证。"""
     try:image=await asyncio.to_thread(client.images.get,IMAGE)
     except docker.errors.ImageNotFound:raise HTTPException(503,'分析镜像未安装')
     version=await asyncio.to_thread(client.version)
     info=await asyncio.to_thread(client.info)
     if info.get('OSType')!='linux' or not all(info.get(key) for key in ('MemoryLimit','PidsLimit','CpuCfsQuota')):
         raise HTTPException(503,'需要支持内存/进程/CPU限额的Linux Docker引擎，不降低执行限制')
-    return {'ready':True,'policy':POLICY,'image_id':image.id,'active':len(active),'docker_version':version['Version'],'parser_version':'0.7.2','capacity':CAPACITY,'runner_id':RUNNER_ID,'formats':['txt','md','csv','xlsx','docx','pdf'],'outputs':['txt','md','csv','xlsx','docx','pdf','png']}
+    return {'ready':True,'policy':POLICY,'image_id':image.id,'docker_version':version['Version'],'parser_version':'0.7.2','capacity':CAPACITY,'runner_id':RUNNER_ID,'instance_id':INSTANCE_ID,'formats':['txt','md','csv','xlsx','docx','pdf'],'outputs':['txt','md','csv','xlsx','docx','pdf','png']}
 
 
 @app.delete('/jobs/{job_id}')
@@ -113,7 +164,7 @@ def create_instance(job_id,body):
         ulimits=[docker.types.Ulimit(name='nofile',soft=128,hard=128),docker.types.Ulimit(name='fsize',soft=20*1024*1024,hard=20*1024*1024)],
         mounts=[mount],tmpfs={'/output':'rw,nosuid,nodev,noexec,size=256m,uid=10001,gid=10001,mode=0700','/tmp':'rw,nosuid,nodev,size=64m,mode=1777'},
         environment={'MPLCONFIGDIR':'/tmp/mpl','OPENBLAS_NUM_THREADS':'1','OMP_NUM_THREADS':'1','HOME':'/tmp','TZ':'Asia/Shanghai'},
-        labels={'zhixing.sandbox':'task','zhixing.job':job_id,'zhixing.runner':RUNNER_ID},log_config=docker.types.LogConfig(type='json-file',config={'max-size':'128k','max-file':'1'}))
+        labels={'zhixing.sandbox':'task','zhixing.job':job_id,'zhixing.runner':RUNNER_ID,'zhixing.instance':INSTANCE_ID},log_config=docker.types.LogConfig(type='json-file',config={'max-size':'128k','max-file':'1'}))
 
 
 def collect(container):
@@ -192,7 +243,7 @@ async def execute_job(job_id, body, lease=None):
             receipt=await asyncio.to_thread(collect,container)
             receipt['stdout']=(await asyncio.to_thread(container.logs)).decode('utf-8',errors='replace')[:65536]
             receipt['duration_ms']=round((time.monotonic()-start)*1000)
-        except asyncio.CancelledError:raise
+        except asyncio.CancelledError:receipt={'ok':False,'error':{'code':'SANDBOX_RESULT_UNKNOWN','message':'节点排空超时，执行已中止；不能确认结果，不自动重跑'},'artifacts':[]}
         except Exception as error:receipt={'ok':False,'error':{'code':'SANDBOX_FAILED','message':str(error)[:1500]},'artifacts':[]}
         finally:
             if container:
@@ -210,7 +261,7 @@ async def queue_driver():
     async with httpx.AsyncClient(timeout=15,trust_env=False) as api:
         async def work(body):
             """接收已领取任务，续租、执行后提交真实回执；提交失败留存未知而不重跑代码。"""
-            ident=body['job_id'];version=body['lease_version'];node={'runner_id':RUNNER_ID,'lease_version':version}
+            ident=body['job_id'];version=body['lease_version'];node={'runner_id':RUNNER_ID,'instance_id':INSTANCE_ID,'lease_version':version}
             async def lease():
                 """无参数核验实际任务归属/取消并续租；控制接口不可用即停止当前客体。"""
                 value=await api.post(API_URL+'/jobs/'+ident+'/renew',headers=HEADERS,json=node)
@@ -229,19 +280,20 @@ async def queue_driver():
                 # 领取/回执均由PG租约恢复标未知，不输出请求头或敏感输入。
                 pass
         try:
-            while True:
+            while not stopping.is_set():
                 tasks={task for task in tasks if not task.done()}
-                if len(tasks)<CAPACITY:
+                if ready and not draining and len(tasks)<CAPACITY:
                     try:
-                        state=await health(HEADERS['Authorization'])
-                        response=await api.post(API_URL+'/claim',headers=HEADERS,json={'runner_id':RUNNER_ID,'capacity':CAPACITY,'image_id':state['image_id']})
+                        response=await api.post(API_URL+'/claim',headers=HEADERS,json={'runner_id':RUNNER_ID,'instance_id':INSTANCE_ID,'capacity':CAPACITY,'image_id':node_manifest['image_id']})
                         response.raise_for_status();body=response.json()['job']
                         if body:
                             tasks.add(asyncio.create_task(work(body)));continue
                     except Exception:pass
                 await asyncio.sleep(.3)
         finally:
-            for task in tasks:task.cancel()
+            pending=set()
+            if tasks:_,pending=await asyncio.wait(tasks,timeout=SHUTDOWN_SECONDS)
+            for task in pending:task.cancel()
             await asyncio.gather(*tasks,return_exceptions=True)
 
 

@@ -49,8 +49,8 @@ class ContextAssembler:
                 value.update({key:protocol.get('message',{}).get(key) for key in ('reasoning_content','tool_calls') if key in protocol.get('message',{})})
                 value['_provider'] = protocol.get('provider')
             messages.append(value)
-        # 预算包括真实协议、系统提示和输出预留，并保留 20% 安全余量；备用槽位重新计算。
+        # 预算包括真实协议、系统提示和输出预留，使用槽位统一安全比例；备用槽位重新计算。
         adapted = slot.request(messages,self.output_tokens)['messages']
-        if estimate_tokens(adapted,slot.model)+self.output_tokens > int(slot.window*0.8):
+        if estimate_tokens(adapted,slot.model)+self.output_tokens > slot.safe_limit:
             raise GatewayError("CONTEXT_TOO_LARGE","这段会话超过当前模型的安全上下文范围，请新建会话或缩短输入")
         return messages

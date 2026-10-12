@@ -58,11 +58,12 @@ class SandboxService:
     async def health(self):
         """无参数确认专用服务与固定普通Docker模板可用，失败不降级到应用执行。"""
         try:
-            async with httpx.AsyncClient(timeout=4,trust_env=False) as client:
-                response=await client.get(self.settings.sandbox_runner_url+'/health',headers=self.headers());response.raise_for_status()
-                value=response.json()
-                if not value['ready'] or value['policy']['runtime']!='docker' or value['policy']['network']!='none':raise ValueError()
-                return value
+            # 共享健康目录避免只探测DNS随机返回的一个副本；排空/失联节点不提供新的能力。
+            async with self.pool.acquire() as conn:
+                value=await conn.fetchval('''SELECT manifest FROM app_runtime.sandbox_nodes
+                    WHERE expires_at>now() AND NOT draining ORDER BY runner_id LIMIT 1''')
+            if value is None or value['policy']['runtime']!='docker' or value['policy']['network']!='none':raise ValueError()
+            return value
         except (httpx.HTTPError,ValueError,KeyError):raise auth_error(503,'SANDBOX_UNAVAILABLE','独立Docker沙箱不可用，不会在应用内执行代码') from None
 
     async def attachments(self,ids,context,run):
@@ -112,6 +113,8 @@ class SandboxService:
                 if queued>=self.settings.sandbox_queue_limit or per_user>=10:
                     raise auth_error(429,'SANDBOX_QUEUE_LIMIT','沙箱积压达到上限，请稍后再试；正常并发满额会自动排队')
                 if operation=='execute':
+                    if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM app_runtime.sandbox_jobs WHERE run_id=$1 AND status='unknown')",run['run_id']):
+                        raise auth_error(409,'SANDBOX_RESULT_UNKNOWN','本轮先前执行结果未知，不能自动再次运行代码；请确认清理后另发任务')
                     attempts=await conn.fetchval("SELECT count(*) FROM app_runtime.sandbox_attempts WHERE run_id=$1 AND operation='execute'",run['run_id'])
                     if attempts>=3:raise auth_error(429,'SANDBOX_ATTEMPT_LIMIT','同一任务最多执行3次代码')
                     if not arguments.get('code','').strip():raise auth_error(422,'CODE_REQUIRED','执行须提供完整代码')

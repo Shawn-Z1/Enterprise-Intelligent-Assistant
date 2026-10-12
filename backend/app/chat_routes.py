@@ -96,7 +96,7 @@ async def send_message(conversation_id: ShortId,body: MessageBody,request: Reque
                 'message_id':file['message_id'] or message_id,'source_question':(file['source_question'] or body.content)[:600],
                 'sent_at':file['sent_at'].isoformat() if file['sent_at'] else None,'table_prefix':f'f{index+1}_s'} for index,file in enumerate(files)]
             rows.append({'role':'user','content':body.content,'run_id':run_id,'protocol_json':{},'attachments':[file for file in catalog if file['attachment_id'] in body.attachment_ids]})
-            slot = ModelSlot('primary',settings.primary_base_url,settings.primary_api_key.get_secret_value(),settings.primary_model,settings.primary_context_tokens)
+            slot = ModelSlot('primary',settings.primary_base_url,settings.primary_api_key.get_secret_value(),settings.primary_model,settings.primary_context_tokens,settings.model_context_safety_ratio)
             try:
                 ContextAssembler(rows,run_id,settings.model_output_tokens,catalog).assemble(slot)
             except GatewayError as error:

@@ -95,7 +95,7 @@ class RagAgent:
     def factory(self, slot):
         """接收主或备用模型槽位，组装完整工具调用/观察配对并计入工具 schema 预算，超限明确拒绝。"""
         messages = self.assembler.assemble(slot)+self.current_state['messages']
-        if estimate_tokens(slot.request(messages,self.processor.settings.model_output_tokens)['messages'],slot.model)+estimate_tokens(self.current_tools,slot.model)+self.processor.settings.model_output_tokens>int(slot.window*0.8):
+        if estimate_tokens(slot.request(messages,self.processor.settings.model_output_tokens)['messages'],slot.model)+estimate_tokens(self.current_tools,slot.model)+self.processor.settings.model_output_tokens>slot.safe_limit:
             raise GatewayError('CONTEXT_TOO_LARGE', '检索结果与历史超过当前模型安全窗口，请新建会话或缩短问题')
         return messages
 
