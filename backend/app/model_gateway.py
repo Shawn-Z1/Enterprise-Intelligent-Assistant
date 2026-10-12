@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+import inspect
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Awaitable, Callable
@@ -186,7 +187,6 @@ class ModelGateway:
             half_open = circuit.opened_until>0
             circuit.probing = half_open
             try:
-                messages = factory(slot)
                 slot.endpoint()
             except GatewayError as error:
                 circuit.probing = False
@@ -204,6 +204,7 @@ class ModelGateway:
                         # 每次实际请求重建工具目录与消息，重试/备用不会沿用撤权前的schema。
                         actual_tools = await tools() if callable(tools) else tools
                         messages = factory(slot)
+                        if inspect.isawaitable(messages):messages = await messages
                         result = await self._attempt(slot,messages,number,attempt_id,audit,emit,actual_tools)
                         circuit.failures,circuit.opened_until = 0,0
                         return result
@@ -236,6 +237,7 @@ class ModelGateway:
                 if guard:
                     await guard()
                 messages = factory(slot)
+                if inspect.isawaitable(messages):messages = await messages
                 try:
                     result = await self._attempt(slot,messages,number,new_id(),audit,emit)
                     circuit.failures,circuit.opened_until = 0,0
@@ -251,18 +253,19 @@ class ModelGateway:
         finally:
             circuit.probing = False
 
-    async def _attempt(self, slot: ModelSlot, messages: list[dict], number: int, attempt_id: str, audit: AuditCallback, emit: EventCallback, tools: list[dict] | None=None) -> ModelResult:
+    async def _attempt(self, slot: ModelSlot, messages: list[dict], number: int, attempt_id: str, audit: AuditCallback, emit: EventCallback, tools: list[dict] | None=None, output_tokens: int | None=None) -> ModelResult:
         """接收槽位、上下文和尝试标识，执行一次实际 HTTP 流；完整审计后返回标准结果，途中失败保留原始包。"""
-        body = slot.request(messages,self.settings.model_output_tokens)
+        output_tokens = self.settings.model_output_tokens if output_tokens is None else output_tokens
+        body = slot.request(messages,output_tokens)
         if tools:
             body['tools'] = tools
             body['tool_choice'] = 'auto'
         metadata = {"attempt_id":attempt_id,"slot":slot.role,"provider":slot.provider,"model":slot.model,"attempt":number}
         # 网关统一复核实际消息和工具预算，独立公开关键词等调用也不会绕过窗口检查。
         counted=count_request(body['messages'],body.get('tools'),slot.model)
-        budget={'input_tokens':counted.count,'output_reserved':self.settings.model_output_tokens,'window':slot.window,'safe_limit':slot.safe_limit,
+        budget={'input_tokens':counted.count,'output_reserved':output_tokens,'window':slot.window,'safe_limit':slot.safe_limit,
                 'method':counted.method,'tokenizer':counted.tokenizer,'source':'estimated'}
-        if counted.count+self.settings.model_output_tokens>budget['safe_limit']:
+        if counted.count+output_tokens>budget['safe_limit']:
             await audit('model.budget_rejected',{**metadata,'budget':budget},None)
             raise GatewayError('CONTEXT_TOO_LARGE','本次输入与预留输出超过模型安全窗口，请缩小任务')
         await audit("model.request",{**metadata,"request":body,'budget':budget},None)

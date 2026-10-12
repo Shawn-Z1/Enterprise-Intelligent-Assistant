@@ -46,12 +46,16 @@ class State(TypedDict):
 
 class RagAgent:
     """使用现有主备流式网关构建真实工具循环；原调用和观察写入永久表，界面不展示模型计费。"""
-    def __init__(self, processor, rag, writer, rows):
+    def __init__(self, processor, rag, writer, rows, memory=None):
         """接收聊天执行器、真实检索、事件写入器与本人历史，初始化限轮图和本次证据集。"""
         self.processor, self.rag, self.writer = processor, rag, writer
         self.assembler = ContextAssembler(rows, writer.run['run_id'], processor.settings.model_output_tokens,writer.run['state_json'].get('attachment_catalog',[]))
+        # 同一run重试/跨Worker接续沿用创建时间，避免仅因重新构造实例再次改变运行信息。
+        if writer.run.get('created_at'):self.assembler.timestamp=writer.run['created_at'].isoformat()
         self.citations, self.observations, self.protocol = [], [], []
         self.current_tools = []
+        # 每个run独立工作上下文管理器，避免同一Worker并发任务共享可变状态。
+        self.memory=memory
         # 仅当前用户问题可供公开查询投影，内部历史及工具正文不参与外发词生成。
         self.current_input = next((row['content'] for row in reversed(rows) if row['role']=='user' and row.get('run_id')==writer.run['run_id']),'')
         self.sandbox = getattr(processor,'sandbox',None)
@@ -92,9 +96,12 @@ class RagAgent:
             detail=error.detail if isinstance(error.detail,dict) else {'code':'UNAUTHENTICATED','message':'登录已失效，请重新登录'}
             raise GatewayError(detail['code'],detail['message']) from None
 
-    def factory(self, slot):
+    async def factory(self, slot):
         """接收主或备用模型槽位，组装完整工具调用/观察配对并计入工具 schema 预算，超限明确拒绝。"""
-        messages = self.assembler.assemble(slot)+self.current_state['messages']
+        base=self.assembler.assemble(slot,check_budget=False)
+        if self.memory:
+            return await self.memory.fit(slot,base,self.current_state['messages'],self.current_tools,self.guard)
+        messages = base+self.current_state['messages']
         if estimate_tokens(slot.request(messages,self.processor.settings.model_output_tokens)['messages'],slot.model)+estimate_tokens(self.current_tools,slot.model)+self.processor.settings.model_output_tokens>slot.safe_limit:
             raise GatewayError('CONTEXT_TOO_LARGE', '检索结果与历史超过当前模型安全窗口，请新建会话或缩短问题')
         return messages
@@ -176,6 +183,8 @@ class RagAgent:
         self.current_state = state
         await self.guard()
         result = await self.processor.gateway.complete(self.factory, self.writer.record_model, self.emit, self.tool_schemas, self.guard)
+        if result.finish_reason=='length':
+            raise GatewayError('MODEL_OUTPUT_LIMIT','模型生成因长度限制结束，未发布截断内容。请将内容分段处理后重试')
         result.message['_provider'] = result.provider
         return {'messages':state['messages']+[result.message], 'result':pack_result(result), 'turns':state['turns']+1,'tool_index':0}
 

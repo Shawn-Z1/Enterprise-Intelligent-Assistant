@@ -9,7 +9,7 @@ from pydantic import Field, field_validator
 
 from app.auth import StrictBody, auth_error, current_context, mutation_context, security_event
 from app.chat_service import RunWriter, TERMINAL, public_run
-from app.context import ContextAssembler, load_history
+from app.context import ContextAssembler
 from app.ids import ShortId, new_id
 from app.model_gateway import GatewayError, ModelSlot
 from app.permissions import AuthContext
@@ -86,7 +86,8 @@ async def send_message(conversation_id: ShortId,body: MessageBody,request: Reque
                 count=await conn.fetchval('SELECT count(*) FROM app_runtime.analysis_attachments WHERE attachment_id=ANY($1::varchar[]) AND user_id=$2 AND conversation_id=$3 AND NOT draft_removed',body.attachment_ids,context.user_id,conversation_id)
                 if count!=len(body.attachment_ids):raise auth_error(404,'ATTACHMENT_NOT_FOUND','附件不可访问或不属于当前会话')
             run_id,message_id = new_id(),new_id()
-            rows = await load_history(conn,conversation_id,context.user_id)
+            # API只检查当前问题能否单独容纳；历史由Worker压缩，不能在入队前因旧历史超窗拒绝。
+            rows = []
             # 固定本次授权目录：已发送附件与当前待发送附件；上传但尚未发送的其他文件不可见。
             files=await conn.fetch('''SELECT a.*,m.content AS source_question,m.created_at AS sent_at
                 FROM app_runtime.analysis_attachments a LEFT JOIN app_runtime.messages m ON m.message_id=a.message_id

@@ -140,12 +140,18 @@ async def evaluate(agent, state: dict) -> tuple[ReviewDecision,list[dict]]:
         raise GatewayError('EXECUTION_RECORD_INVALID','本轮工具执行记录无法核对，已停止发布，请重试')
     tools = await agent.tool_schemas()
     # 审核采用真实记录和当前协议，不由主模型自述生成轨迹摘要；预算不足明确停止审核。
-    def factory(slot):
+    async def factory(slot):
         """接收独立审核槽位，使用其窗口整理相关历史与完整本轮轨迹，返回审核专属消息。"""
-        payload = {'user_question':agent.current_input,'related_context':visible_messages(agent.assembler.assemble(slot)),
+        payload = {'user_question':agent.current_input,'related_context':[],
                    'trajectory':visible_messages(state['messages']),'available_tools':tools,'attachment_preparation':preparation,
                    'tool_records':[{key:value for key,value in row.items() if key!='output_json'} | {'output':review_output(row)} for row in records],
                    'draft_answer':result.content,'backend_issues':issues,'revision_count':state['revisions']}
+        protected=[{'role':'system','content':REVIEW_INSTRUCTIONS},{'role':'user','content':json.dumps(redact_secrets(payload,agent.processor.audit.secrets),ensure_ascii=False)}]
+        base=agent.assembler.assemble(slot,check_budget=False)
+        if getattr(agent,'memory',None):
+            combined=await agent.memory.fit(slot,base,protected,[],agent.guard,allow_tool_summary=False)
+            base=combined[:-len(protected)]
+        payload['related_context']=visible_messages(base)
         return [{'role':'system','content':REVIEW_INSTRUCTIONS},{'role':'user','content':json.dumps(redact_secrets(payload,agent.processor.audit.secrets),ensure_ascii=False)}]
     async def silent_emit(kind, data):
         """接收审核网关事件，仅用写入器检查取消/身份；不向界面发送审核JSON或待审文本。"""

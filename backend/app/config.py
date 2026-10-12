@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     # 输入、工具定义和输出预留合计最多使用窗口的这一比例，余量补偿参考分词及隐藏模板差异。
     model_context_safety_ratio: float = Field(default=0.95,ge=0.5,le=0.99)
     model_output_tokens: int = Field(default=4096,ge=64,le=32768)
+    # 压缩触发线低于最终安全线；近期轮数是目标，当前输入和活动协议始终保留。
+    context_compress_trigger_ratio: float = Field(default=0.75,ge=0.3,le=0.9)
+    context_keep_turns: int = Field(default=4,ge=0,le=12)
+    context_summary_tokens: int = Field(default=2048,ge=256,le=8192)
+    context_compression_max_chunks: int = Field(default=16,ge=1,le=64)
+    context_cache_ttl_seconds: int = Field(default=1800,ge=10,le=86400)
+    context_cache_max_bytes: int = Field(default=2*1024*1024,ge=1024,le=16*1024*1024)
     model_read_timeout_seconds: float = Field(default=45,ge=1,le=180)
     model_retry_backoff_seconds: float = Field(default=0.5,ge=0,le=10)
     model_circuit_failures: int = Field(default=3,ge=1,le=20)

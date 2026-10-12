@@ -4,6 +4,7 @@ from time import monotonic
 
 from app.audit import AuditRecorder, Usage, redact_secrets
 from app.context import ContextAssembler
+from app.context_memory import ContextMemory
 from app.ids import new_id
 from app.model_gateway import GatewayError, ModelGateway, ModelResult
 from app.sensitive_actions import HumanSecondaryConfirmationHook
@@ -210,19 +211,26 @@ class ChatProcessor:
         writer = RunWriter(self.pool,self.audit,run)
         renewal = asyncio.create_task(self.renew(run,asyncio.current_task()))
         started=monotonic()
+        memory=ContextMemory(self.pool,self.settings,self.gateway,writer)
         try:
-            async with self.pool.acquire() as conn:
-                from app.context import load_history
-                rows = await load_history(conn,run['conversation_id'],run['user_id'])
+            rows = await memory.history()
+            await writer.emit('context.cache',{'message':'已读取会话工作上下文','cache_status':memory.last_cache_status})
             assembler = ContextAssembler([dict(row) for row in rows],run['run_id'],self.settings.model_output_tokens)
+            # 普通文本路径也保持同一任务的时间信息固定，不随重新领取变化。
+            assembler.timestamp=run['created_at'].isoformat()
             remaining=self.settings.run_timeout_seconds-run['state_json'].get('active_elapsed',0)
             async with asyncio.timeout(max(0.01,remaining)):
                 if self.rag:
                     from app.rag_agent import RagAgent
-                    result = await RagAgent(self,self.rag,writer,[dict(row) for row in rows]).run()
+                    result = await RagAgent(self,self.rag,writer,[dict(row) for row in rows],memory=memory).run()
                 else:
-                    result = await self.gateway.complete(assembler.assemble,writer.record_model,writer.emit)
-                if result is not None:await writer.finish('completed',result=result)
+                    async def factory(slot):
+                        """接收目标槽位，用本任务缓存/摘要生成可发送历史；普通文本路径也不能绕过压缩预算。"""
+                        return await memory.fit(slot,assembler.assemble(slot,check_budget=False),[],[],writer.check_active)
+                    result = await self.gateway.complete(factory,writer.record_model,writer.emit)
+                if result is not None:
+                    if result.finish_reason=='length':raise GatewayError('MODEL_OUTPUT_LIMIT','模型生成因长度限制结束，未发布截断内容。请将内容分段处理后重试')
+                    await writer.finish('completed',result=result)
         except asyncio.CancelledError:
             async with self.pool.acquire() as conn:
                 cancelled = await conn.fetchval('SELECT r.cancel_requested OR u.status<>\'active\' FROM app_runtime.runs r JOIN app_system.users u USING(user_id) WHERE run_id=$1',run['run_id'])
@@ -240,6 +248,7 @@ class ChatProcessor:
                     await conn.execute("UPDATE app_runtime.runs SET status='failed',state_json=state_json || $1::jsonb,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE run_id=$2",
                         {'error':{'code':'AUDIT_UNAVAILABLE','message':'审计存储不可用，本次回答已停止'},'audit_pending':True},run['run_id'])
         finally:
+            await memory.close()
             renewal.cancel()
             await asyncio.gather(renewal,return_exceptions=True)
             async with self.pool.acquire() as conn:

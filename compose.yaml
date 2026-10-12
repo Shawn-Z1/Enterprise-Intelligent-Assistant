@@ -41,6 +41,12 @@ x-backend-env: &backend-env
   PRIMARY_CONTEXT_TOKENS: ${PRIMARY_CONTEXT_TOKENS:-0}
   FALLBACK_CONTEXT_TOKENS: ${FALLBACK_CONTEXT_TOKENS:-0}
   MODEL_CONTEXT_SAFETY_RATIO: ${MODEL_CONTEXT_SAFETY_RATIO:-0.95}
+  CONTEXT_COMPRESS_TRIGGER_RATIO: ${CONTEXT_COMPRESS_TRIGGER_RATIO:-0.75}
+  CONTEXT_KEEP_TURNS: ${CONTEXT_KEEP_TURNS:-4}
+  CONTEXT_SUMMARY_TOKENS: ${CONTEXT_SUMMARY_TOKENS:-2048}
+  CONTEXT_COMPRESSION_MAX_CHUNKS: ${CONTEXT_COMPRESSION_MAX_CHUNKS:-16}
+  CONTEXT_CACHE_TTL_SECONDS: ${CONTEXT_CACHE_TTL_SECONDS:-1800}
+  CONTEXT_CACHE_MAX_BYTES: ${CONTEXT_CACHE_MAX_BYTES:-2097152}
   MODEL_OUTPUT_TOKENS: ${MODEL_OUTPUT_TOKENS:-4096}
   MODEL_READ_TIMEOUT_SECONDS: ${MODEL_READ_TIMEOUT_SECONDS:-45}
   MODEL_RETRY_BACKOFF_SECONDS: ${MODEL_RETRY_BACKOFF_SECONDS:-0.5}
@@ -175,7 +181,7 @@ services:
 
   api:
     build: ./backend
-    image: zhixing-backend:0.7.3
+    image: zhixing-backend:0.10.0
     environment: *backend-env
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
@@ -189,7 +195,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: zhixing-backend:0.7.3
+    image: zhixing-backend:0.10.0
     build: ./backend
     command: ["python", "-m", "app.worker"]
     deploy:
@@ -208,7 +214,7 @@ services:
   # 显式管理任务：外置迁移和种子只读挂载，不在应用启动时自动导入。
   db-admin:
     profiles: ["tools"]
-    image: zhixing-backend:0.7.3
+    image: zhixing-backend:0.10.0
     build: ./backend
     entrypoint: ["python", "-m", "app.db_admin"]
     environment:
@@ -217,6 +223,7 @@ services:
       SANDBOX_CONTROL_TOKEN: ${SANDBOX_CONTROL_TOKEN:-}
       TZ: Asia/Shanghai
       POSTGRES_HOST: postgres
+      REDIS_HOST: redis
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -241,6 +248,12 @@ services:
       PRIMARY_CONTEXT_TOKENS: ${PRIMARY_CONTEXT_TOKENS:-0}
       FALLBACK_CONTEXT_TOKENS: ${FALLBACK_CONTEXT_TOKENS:-0}
       MODEL_CONTEXT_SAFETY_RATIO: ${MODEL_CONTEXT_SAFETY_RATIO:-0.95}
+      CONTEXT_COMPRESS_TRIGGER_RATIO: ${CONTEXT_COMPRESS_TRIGGER_RATIO:-0.75}
+      CONTEXT_KEEP_TURNS: ${CONTEXT_KEEP_TURNS:-4}
+      CONTEXT_SUMMARY_TOKENS: ${CONTEXT_SUMMARY_TOKENS:-2048}
+      CONTEXT_COMPRESSION_MAX_CHUNKS: ${CONTEXT_COMPRESSION_MAX_CHUNKS:-16}
+      CONTEXT_CACHE_TTL_SECONDS: ${CONTEXT_CACHE_TTL_SECONDS:-1800}
+      CONTEXT_CACHE_MAX_BYTES: ${CONTEXT_CACHE_MAX_BYTES:-2097152}
       MODEL_OUTPUT_TOKENS: ${MODEL_OUTPUT_TOKENS:-4096}
       MODEL_READ_TIMEOUT_SECONDS: ${MODEL_READ_TIMEOUT_SECONDS:-45}
       MODEL_RETRY_BACKOFF_SECONDS: ${MODEL_RETRY_BACKOFF_SECONDS:-0.5}
@@ -286,7 +299,8 @@ services:
 
   redis:
     image: redis:7.4.5-bookworm
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    mem_limit: 512m
     volumes:
       - redis-data:/data
     healthcheck:

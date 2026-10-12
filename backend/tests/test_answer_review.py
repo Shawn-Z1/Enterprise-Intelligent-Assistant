@@ -109,6 +109,17 @@ class ReviewFlow(unittest.IsolatedAsyncioTestCase):
             'review':reply['protocol_json']['message'].get('answer_review') if reply else None,'counts':dict(self.counts)})
         return state,reply,events
 
+    async def test_output_length_stops_without_publishing(self):
+        """真实PG/生产图接到length结束时保存原响应审计并明确失败，不调用审核或发布截断助手消息。"""
+        def handler(slot,number,request,run):
+            """接收真实网关请求，返回截断协议夹具；不代表实际供应商响应或改变输出预算。"""
+            return httpx.Response(200,content=protocol.packets('尚未写完的说明').replace(b'"finish_reason": "stop"',b'"finish_reason": "length"'))
+        state,reply,events=await self.execute(handler,'写一段说明')
+        self.assertEqual(state['status'],'failed')
+        self.assertEqual(state['state_json']['error']['code'],'MODEL_OUTPUT_LIMIT')
+        self.assertIsNone(reply);self.assertEqual(self.counts['review'],0)
+        self.assertEqual(await self.admin.fetchval("SELECT count(*) FROM app_audit.events WHERE run_id=$1 AND event_type='model.response'",state['run_id']),1)
+
     async def test_missing_tool_repairs_without_publishing_draft(self):
         """注入零工具却声称搜索的初稿，审核驳回后补执行真实入口；通过前正文与审核JSON零泄露。"""
         def handler(slot,count,request,queued):
