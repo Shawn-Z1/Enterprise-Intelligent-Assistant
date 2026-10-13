@@ -32,6 +32,10 @@ def safe_history(rows: list[dict]) -> list[dict]:
             row['content']='这轮历史回答依据会话附件处理了上述用户请求；后续必须重新读取原件，不复用旧统计或引用。'
             # 清掉旧文件正文及协议副本，不能让缓存/摘要携带后来失效的文件事实。
             row['protocol_json']={'message':{'citations':[{'type':'sandbox'}]}}
+        if row['role']=='assistant' and any(item.get('type')=='memory' for item in
+            (row.get('protocol_json') or {}).get('message',{}).get('citations',[])):
+            row['content']='这轮曾读取个人项目记忆，后续需要详情请查询当前有效版本。'
+            row['protocol_json']={'message':{'citations':[{'type':'memory'}]}}
         result.append(row)
     return result
 

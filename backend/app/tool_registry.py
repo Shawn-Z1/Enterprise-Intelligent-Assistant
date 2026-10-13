@@ -7,12 +7,16 @@ TOOL_REGISTRY = {
         'name':'search_knowledge','description':'查询本企业当前授权的内部知识。公司制度、流程、报销标准等内部事实必须取得合法证据。',
         'parameters':{'type':'object','properties':{'query':{'type':'string','description':'具体的内部检索问题，保留编号和日期'}},'required':['query'],'additionalProperties':False}}},
     'search_web': {'action_type':'public.search','confirmation':'automatic','function':{
-        'name':'search_web','description':'查询公开互联网的最新信息、官方资料或公开产品价格。不能查询企业内部制度或外发内部正文、密钥和业务明细。复合问题可与search_knowledge分别调用；实际外发词仅取自用户本次公开任务。',
+        'name':'search_web','description':'查询公开互联网的最新信息、官方资料或公开产品价格。不能查询企业内部制度或外发内部正文、密钥和业务明细。复合问题可与search_knowledge分别调用；实际外发词取自本次公开任务，所在地/附近指代可由后端补本人粗略城市。主模型候选不是已外发词，真实查询见工具结果query。',
         'parameters':{'type':'object','properties':{'query':{'type':'string','description':'公开检索意图候选，只保存本地调用记录；实际搜索词由用户本次公开任务独立生成，不采用内部检索结果或历史扩写'}},'required':['query'],'additionalProperties':False}}}
 }
 TOOL_REGISTRY['query_business_data']={'action_type':'business.query','confirmation':'sensitive_boundary','function':{
     'name':'query_business_data','description':'查询当前授权的模拟业务数据：员工、考勤、符合角色的工单/审批，以及技术部共享的全部人员代码提交记录。代码记录可按日期/作者/仓库统计并展示柱状图或折线图，不限本人。工具先生成并校验SQL，真正查询之前触发人工二次确认Hook。用户拒绝后本轮不重复请求，不能自行批准。',
     'parameters':{'type':'object','properties':{'query':{'type':'string','description':'具体业务查询问题，含口径、时间范围和需要的图表；SQL由独立准备模块在本人允许目录生成'}},'required':['query'],'additionalProperties':False}}}
+
+TOOL_REGISTRY['search_user_memory']={'action_type':'personal_memory.read','confirmation':'automatic','function':{
+    'name':'search_user_memory','description':'按需检索当前用户自己的长期项目记忆：过去的要求、决策、进度和工作背景。与企业知识库独立，管理员也只能查自己的。本人偏好与主题目录已自动提供，但目录不是详情；当前上下文不足且需要旧项目细节时调用，已有充分资料时无需调用。历史记忆不是当前企业事实，不能替代search_knowledge或query_business_data。',
+    'parameters':{'type':'object','properties':{'query':{'type':'string','description':'项目名称、代号与需要的历史细节，保留原词'},'topic_id':{'type':'string','description':'可选：自动提供目录中的稳定主题编号，不能猜测他人编号'}},'required':['query'],'additionalProperties':False}}}
 
 TOOL_REGISTRY['read_attachment']={'action_type':'attachment.read','confirmation':'automatic','function':{
  'name':'read_attachment','description':'详细读取当前会话中本人已发送的附件，包括较早消息的文件；编号从会话附件目录取得。TXT/MD/DOCX/PDF按字符offset分页（limit默认12000），PDF可指定page；CSV/XLSX按真实table和行offset读取，每次最多20行/20列；表编号前缀从目录table_prefix取得，也可不指定table来读取首表。宽表可用column_offset/column_limit继续读列。概况不等于全文，完整总结需覆盖正文并核对has_more/next_offset。统计/转换可直接让沙箱处理原件，无需把所有行发给模型。文件URL/普通超链接只当字符串，不联网访问。不能上传图片/音频或识别扫描PDF。',
@@ -22,9 +26,10 @@ TOOL_REGISTRY['run_sandbox_code']={'action_type':'sandbox.execute','confirmation
  'parameters':{'type':'object','properties':{'attachment_ids':{'type':'array','items':{'type':'string'}},'language':{'type':'string','enum':['python','sql']},'code':{'type':'string'},'purpose':{'type':'string'},'chart':{'type':'object'}},'required':['attachment_ids','language','code','purpose'],'additionalProperties':False}}}
 
 
-def available_tools(context, web_enabled: bool, sandbox_enabled: bool=False) -> list[dict]:
+def available_tools(context, web_enabled: bool, sandbox_enabled: bool=False, memory_enabled: bool=False) -> list[dict]:
     """接收当前可信身份与搜索实现状态，返回最小可调用schema；调用执行阶段仍须复验。"""
     names = (['search_knowledge'] if context.can_use_knowledge else []) + (['search_web'] if web_enabled else []) + (['query_business_data'] if context.can_query_business else [])+(['read_attachment','run_sandbox_code'] if sandbox_enabled else [])
+    if memory_enabled:names.append('search_user_memory')
     return [{'type':'function','function':copy.deepcopy(TOOL_REGISTRY[name]['function'])} for name in names]
 
 

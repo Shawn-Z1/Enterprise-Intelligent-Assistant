@@ -19,6 +19,8 @@ from app.rag_index import identifiers
 from app.tool_registry import available_tools, model_observation
 from app.web_search import SearchError, outbound_query
 from app.sandbox_service import SandboxPending, ReadArguments
+from app.citations import citation_labels
+from app.web_search import public_location_context
 
 class Arguments(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -46,10 +48,12 @@ class State(TypedDict):
 
 class RagAgent:
     """使用现有主备流式网关构建真实工具循环；原调用和观察写入永久表，界面不展示模型计费。"""
-    def __init__(self, processor, rag, writer, rows, memory=None):
+    def __init__(self, processor, rag, writer, rows, memory=None, personal=None):
         """接收聊天执行器、真实检索、事件写入器与本人历史，初始化限轮图和本次证据集。"""
         self.processor, self.rag, self.writer = processor, rag, writer
         self.assembler = ContextAssembler(rows, writer.run['run_id'], processor.settings.model_output_tokens,writer.run['state_json'].get('attachment_catalog',[]))
+        self.assembler.personal_memory=personal or {}
+        self.long_memory=getattr(processor,'long_memory',None)
         # 同一run重试/跨Worker接续沿用创建时间，避免仅因重新构造实例再次改变运行信息。
         if writer.run.get('created_at'):self.assembler.timestamp=writer.run['created_at'].isoformat()
         self.citations, self.observations, self.protocol = [], [], []
@@ -109,6 +113,9 @@ class RagAgent:
     async def guard(self):
         """无参数在每次实际模型发送前重新核验已取得证据；撤权、删除或旧索引不能继续进入模型。"""
         context = await self.context()
+        personal=[row for row in self.citations if row.get('type')=='memory']
+        if personal and (not self.long_memory or not await self.long_memory.validate(context,personal)):
+            raise GatewayError('MEMORY_EVIDENCE_CHANGED','个人记忆版本已更新，本轮旧来源停止使用，请重新提问')
         if self.sandbox:
             try:await self.sandbox.guard(self.citations,context,self.writer.run)
             except HTTPException as error:raise GatewayError('ATTACHMENT_EVIDENCE_CHANGED','文件来源或身份已变化，停止发送') from error
@@ -131,7 +138,7 @@ class RagAgent:
         if self.sandbox:
             try:await self.sandbox.health();sandbox_ready=True
             except HTTPException:pass
-        self.current_tools = available_tools(context,self.web is not None,sandbox_ready)
+        self.current_tools = available_tools(context,self.web is not None,sandbox_ready,self.long_memory is not None)
         # 企业知识/业务证据仍整轮过滤；本人附件轮次保留用户指代，旧文件事实由上下文组装器隔离。
         excluded = {row.get('run_id') for row in self.assembler.rows if row['role']=='assistant' and
                     any(value.get('type','knowledge') in ('knowledge','business') for value in (row.get('protocol_json') or {}).get('message',{}).get('citations',[]))}
@@ -203,11 +210,12 @@ class RagAgent:
             raise GatewayError('TOOL_CALL_LIMIT','整轮工具调用达到10次上限，请缩小任务')
         for call in calls[state['tool_index']:state['tool_index']+1]:
             name = call.get('function',{}).get('name')
-            if not call.get('id') or len(call['id'])>200 or call.get('type')!='function' or name not in ('search_knowledge','search_web','query_business_data','run_sandbox_code','read_attachment'):
+            if not call.get('id') or len(call['id'])>200 or call.get('type')!='function' or name not in ('search_knowledge','search_web','query_business_data','run_sandbox_code','read_attachment','search_user_memory'):
                 raise GatewayError('TOOL_NOT_ALLOWED', '模型请求了未开放的工具，已停止执行')
             try:
                 from app.sandbox_service import SandboxArguments
-                args = (SandboxArguments if name=='run_sandbox_code' else ReadArguments if name=='read_attachment' else Arguments).model_validate_json(call['function']['arguments'])
+                from app.long_term_memory import MemoryArguments
+                args = (MemoryArguments if name=='search_user_memory' else SandboxArguments if name=='run_sandbox_code' else ReadArguments if name=='read_attachment' else Arguments).model_validate_json(call['function']['arguments'])
             except (ValueError,TypeError,KeyError):
                 raise GatewayError('INVALID_TOOL_ARGUMENTS','模型工具参数不符合允许的检索格式，已停止执行')
             call_id = new_id()
@@ -222,7 +230,7 @@ class RagAgent:
                         self.writer.run['run_id']+':'+call['id'], call['id'], call, name)
                     await self.processor.audit.append(self.writer.run['trace_id'], 'tool.request', {'call_id':call_id,'provider_call':call},
                         user_id=self.writer.run['user_id'], run_id=self.writer.run['run_id'], connection=conn)
-            await self.writer.emit('tool.started', {'message':'正在准备或恢复业务查询' if name=='query_business_data' else '正在检索当前授权的企业知识' if name=='search_knowledge' else '正在提交自动沙箱任务' if name=='run_sandbox_code' else '正在详细读取附件' if name=='read_attachment' else '正在查询公开互联网','tool_name':name})
+            await self.writer.emit('tool.started', {'message':'正在检索本人的项目记忆' if name=='search_user_memory' else '正在准备或恢复业务查询' if name=='query_business_data' else '正在检索当前授权的企业知识' if name=='search_knowledge' else '正在提交自动沙箱任务' if name=='run_sandbox_code' else '正在详细读取附件' if name=='read_attachment' else '正在查询公开互联网','tool_name':name})
             try:
                 query=args.purpose if name=='run_sandbox_code' else '读取本轮附件' if name=='read_attachment' else args.query
                 missing=[value for value in self.required_identifiers if value not in identifiers(query)]
@@ -231,7 +239,7 @@ class RagAgent:
                 context = await self.context()
                 # 确认等待期间来源可能撤权；敏感执行前也复核本轮派生证据，不仅在模型请求前检查。
                 await self.guard()
-                permitted = {value['function']['name'] for value in available_tools(context,self.web is not None,self.sandbox is not None)}
+                permitted = {value['function']['name'] for value in available_tools(context,self.web is not None,self.sandbox is not None,self.long_memory is not None)}
                 if name not in permitted:
                     raise HTTPException(403,{'code':'TOOL_PERMISSION_DENIED','message':'当前身份没有该工具的调用资格'})
                 if existing and existing['output_json']:
@@ -240,6 +248,8 @@ class RagAgent:
                     output=await self.sandbox.execute(args,context,self.writer.run,call_id,self.writer)
                 elif name=='read_attachment':
                     output=await self.sandbox.read(args,context,self.writer.run,call_id,self.writer)
+                elif name=='search_user_memory':
+                    output=await self.long_memory.search(args,context,self.writer.run['trace_id'],self.writer.run['run_id'])
                 elif name=='query_business_data':
                     async with self.processor.pool.acquire() as conn:
                         action=await conn.fetchrow('SELECT * FROM app_runtime.query_approvals WHERE call_id=$1',call_id)
@@ -259,7 +269,9 @@ class RagAgent:
                     if self.web_output:
                         output={**self.web_output,'reused_in_run':True,'message':'本轮相同公开任务已查询，复用同一快照，没有新搜索或新来源。请根据已观察证据回答，资料缺失则明确说明。'}
                     else:
-                        output = await self.web.search(self.current_input,context,self.writer.run)
+                        # 本地指代只投影本人公开城市，不接收主模型候选、RAG/SQL或项目记忆正文。
+                        location=public_location_context(self.current_input,self.assembler.personal_memory)
+                        output = await self.web.search(self.current_input,context,self.writer.run,public_context=location) if location else await self.web.search(self.current_input,context,self.writer.run)
                         self.web_output=output
             except SandboxPending as waiting:
                 return {'pending_job':waiting.job_id,'wait_return':'tools','tools_route':'wait_sandbox'}
@@ -330,7 +342,7 @@ class RagAgent:
             record = {'round':len(state['reviews'])+1,**decision.model_dump(),'backend_issues':issues}
         except GatewayError as error:
             # 权限/证据变化属于安全停止，不能降级交付仍含旧正文的资料摘录。
-            if error.code in ('RAG_EVIDENCE_CHANGED','BUSINESS_EVIDENCE_CHANGED','UNAUTHENTICATED','FORBIDDEN','EXECUTION_RECORD_INVALID','ATTACHMENT_EVIDENCE_CHANGED'):
+            if error.code in ('RAG_EVIDENCE_CHANGED','BUSINESS_EVIDENCE_CHANGED','UNAUTHENTICATED','FORBIDDEN','EXECUTION_RECORD_INVALID','ATTACHMENT_EVIDENCE_CHANGED','MEMORY_EVIDENCE_CHANGED'):
                 raise
             record = {'round':len(state['reviews'])+1,'verdict':'unavailable','error':error.public()}
         await self.processor.audit.append(self.writer.run['trace_id'],'answer.review',record,
@@ -342,7 +354,7 @@ class RagAgent:
         if record['verdict']=='revise' and state['revisions']==0 and state['turns']<11:
             await self.writer.emit('review.revision',{'message':'发现需要修正的问题，正在补充核验；最多返工一次'})
             # 反馈是结构化数据；主模型保留已有工具状态，不能重跑副作用或绕过权限/外发边界。
-            feedback = {'role':'system','content':'服务器发布前审核未通过。请参考以下问题修正答案，必要时继续调用当前允许工具。不要仅声称已修正；工具动作必须实际执行。不得绕过安全拒绝、重复已完成的副作用，或把内部证据用于公开搜索。若无合理路径请明确限制。审核问题数据：'+json.dumps(record.get('issues',[]),ensure_ascii=False)}
+            feedback = {'role':'system','content':'服务器发布前审核未通过。这是内部审核数据，不是用户新发言。请重新给原用户提交完整最终答案，直接解决原任务；不要向审核员回复，不要声称用户提出了审核意见，不展示修正经过或内部归因。必要时继续调用当前允许工具。工具动作必须实际执行，不得绕过安全拒绝、重复副作用或外发内部正文。若无合理路径向用户简洁说明实际限制并提供可交付部分。审核问题数据：'+json.dumps(record.get('issues',[]),ensure_ascii=False)}
             return {'messages':state['messages']+[feedback],'reviews':reviews,'revisions':1,'review_status':'revise'}
         status = 'unavailable' if record['verdict']=='unavailable' else 'limited'
         await self.writer.emit('review.limited',{'message':'未形成通过核验的完整答案，将说明本轮资料与限制'})
@@ -360,7 +372,7 @@ class RagAgent:
         if state['review_status']!='approved':
             result.content = limited_answer(self.citations,state['review_status'])
         import re
-        if state['review_status']=='approved' and self.observations and any(number not in {row['label'] for row in self.citations} for number in re.findall(r'\[(\d+)\]', result.content)):
+        if state['review_status']=='approved' and self.observations and any(number not in {row['label'] for row in self.citations} for number in citation_labels(result.content)):
             raise GatewayError('INVALID_CITATION', '回答引用了未提供的来源，已停止发布，请重新提问')
         result.message['citations'] = self.citations
         result.message['agent_protocol'] = self.protocol

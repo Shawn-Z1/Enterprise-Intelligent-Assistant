@@ -9,7 +9,23 @@ interface Preview { format: string; page_count: number; pages?: {page:number;tex
 
 /** 接收引用及关闭动作，在右侧真实定位当前授权来源；失效或撤权清空正文，移动屏采用覆盖面板。 */
 export function SourcePanel({citation,close}: {citation:Citation;close:()=>void}) {
-  return citation.type==='sandbox' ? <SandboxResult resultId={citation.result_id!} close={close}/> : citation.type==='business' ? <BusinessResult resultId={citation.result_id!} close={close}/> : citation.type==='web' ? <WebSourcePanel citation={citation} close={close}/> : <KnowledgeSourcePanel citation={citation} close={close}/>;
+  return citation.type==='memory' ? <MemorySourcePanel citation={citation} close={close}/> : citation.type==='sandbox' ? <SandboxResult resultId={citation.result_id!} close={close}/> : citation.type==='business' ? <BusinessResult resultId={citation.result_id!} close={close}/> : citation.type==='web' ? <WebSourcePanel citation={citation} close={close}/> : <KnowledgeSourcePanel citation={citation} close={close}/>;
+}
+
+/** 接收本人记忆引用及关闭回调，读取当前有效文本；失效清空正文，不提供管理或修改入口。 */
+function MemorySourcePanel({citation,close}: {citation:Citation;close:()=>void}) {
+  const [source,setSource]=useState<(Citation & {content:string}) | null>(null);
+  const [error,setError]=useState('');
+  useEffect(()=>{
+    let alive=true;
+    apiRequest<Citation & {content:string}>(`/memory/sources/${citation.chunk_id}`).then(value=>{if(alive)setSource(value);})
+      .catch(reason=>{if(alive){setSource(null);setError(reason instanceof Error ? reason.message : '记忆来源不可读取');}});
+    return ()=>{alive=false;};
+  },[citation.chunk_id]);
+  return <aside className="source-panel" aria-label="个人记忆来源"><div className="source-heading"><h2>个人记忆来源</h2><button onClick={close}>关闭</button></div>
+    <p>这是过去的项目记录，当前要求优先；企业事实仍需查询当前授权资料。</p>
+    {error && <p role="alert">{error}</p>}{source && <><h3>{source.title}</h3><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{source.content}</pre></>}
+  </aside>;
 }
 
 /** 接收内部引用与关闭回调，复用原件预览；返回受当前知识权限约束的来源面板。 */

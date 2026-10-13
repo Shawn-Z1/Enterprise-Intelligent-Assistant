@@ -23,6 +23,7 @@ from app.web_routes import router as web_router
 from app.action_routes import router as action_router
 from app.sandbox_routes import router as sandbox_router
 from app.sandbox_queue import router as sandbox_queue_router
+from app.memory_routes import router as memory_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logging.getLogger('httpx').setLevel(logging.WARNING)
@@ -47,15 +48,15 @@ async def lifespan(app: FastAPI):
     app.state.rag = RagService(app.state.pool,app.state.settings,app.state.rag_index,app.state.knowledge_storage,app.state.audit)
     try:
         trace_id = new_id()
-        await app.state.audit.append(trace_id, "service.started", {"service": "api", "milestone": "M10"})
-        app.state.events.record(trace_id, "service.started", {"service": "api", "milestone": "M10"})
+        await app.state.audit.append(trace_id, "service.started", {"service": "api", "milestone": "M11"})
+        app.state.events.record(trace_id, "service.started", {"service": "api", "milestone": "M11"})
         yield
     finally:
         await app.state.rag_index.close()
         await app.state.pool.close()
 
 
-app = FastAPI(title="知行企业智能助理", version="0.10.0", lifespan=lifespan,
+app = FastAPI(title="知行企业智能助理", version="0.11.2", lifespan=lifespan,
               docs_url="/api/docs", openapi_url="/api/openapi.json", redoc_url=None)
 app.include_router(identity_router)
 app.include_router(chat_router)
@@ -64,6 +65,7 @@ app.include_router(web_router)
 app.include_router(action_router)
 app.include_router(sandbox_router)
 app.include_router(sandbox_queue_router)
+app.include_router(memory_router)
 
 
 @app.middleware("http")
@@ -144,7 +146,7 @@ async def unexpected_error(request: Request, error: Exception):
 @app.get("/api/health/live")
 async def live(request: Request):
     """接收请求；仅返回 API 进程存活状态，不将它宣称为依赖就绪。"""
-    return {"status": "alive", "service": "api", "milestone": "M10", "trace_id": str(request.state.trace_id)}
+    return {"status": "alive", "service": "api", "milestone": "M11", "trace_id": str(request.state.trace_id)}
 
 
 @app.get("/api/health/ready")

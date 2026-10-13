@@ -16,6 +16,9 @@ from app.model_gateway import ModelGateway
 from app.knowledge_storage import KnowledgeStorage
 from app.knowledge_worker import KnowledgeProcessor
 from app.rag_index import RagIndex
+from app.memory_index import MemoryIndex
+from app.long_term_memory import LongTermMemory
+from app.memory_worker import MemoryProcessor
 from app.rag_service import RagService
 from app.web_search import WebSearchService
 from app.knowledge_indexer import KnowledgeIndexer
@@ -30,7 +33,7 @@ async def heartbeat(settings, pool, audit, stopping: asyncio.Event, worker_id: s
     """接收settings/pool/audit、停止事件及本副本worker_id，保存时间/容量/依赖心跳；停止后返回无任务结果。"""
     events,trace_id = InfrastructureEvents(),new_id()
     path,previous = Path(settings.worker_state_path),None
-    await audit.append(trace_id,'service.started',{'service':'worker','milestone':'M10','worker_id':worker_id,'capacity':settings.worker_concurrency})
+    await audit.append(trace_id,'service.started',{'service':'worker','milestone':'M11','worker_id':worker_id,'capacity':settings.worker_concurrency})
     while not stopping.is_set():
         results = await check_dependencies(settings)
         state = {'timestamp':beijing_now().isoformat(),'pid':os.getpid(),'worker_id':worker_id,'capacity':settings.worker_concurrency,'ready':all(item.status=='ready' for item in results.values()),
@@ -57,12 +60,15 @@ async def run():
     audit = AuditRecorder(pool,'worker',secrets)
     gateway = ModelGateway(settings)
     index = RagIndex(settings)
+    private_index=MemoryIndex(settings)
+    long_memory=LongTermMemory(pool,settings,private_index,audit)
     storage = KnowledgeStorage(settings)
     rag = RagService(pool,settings,index,storage,audit)
     web = WebSearchService(pool,settings,audit)
     # 同一副本的两类队列使用同一随机身份，重启生成新身份；PG租约阻止旧副本写回。
     worker_id=new_id()
-    processor = ChatProcessor(pool,settings,gateway,audit,worker_id=worker_id,rag=rag,web=web)
+    processor = ChatProcessor(pool,settings,gateway,audit,worker_id=worker_id,rag=rag,web=web,long_memory=long_memory)
+    personal=MemoryProcessor(pool,settings,gateway,audit,long_memory,worker_id)
     knowledge = KnowledgeProcessor(pool,settings,storage,audit,KnowledgeIndexer(pool,settings,index,audit),worker_id=worker_id)
     await queue_existing_approved(pool,knowledge)
     stopping = asyncio.Event()
@@ -72,8 +78,9 @@ async def run():
     health_task = asyncio.create_task(heartbeat(settings,pool,audit,stopping,worker_id))
     # 执行集合只负责本进程调度，真实任务和租约始终保存在 PG。
     tasks = set()
-    # 两个队列交替优先，持续聊天不会饿死知识解析；共用既有并发上限。
-    prefer_knowledge = True
+    # 三类任务轮换优先并共用既有槽位；后台记忆不会额外创建不受控并发。
+    queues=[processor,knowledge,personal]
+    queue_cursor=0
     try:
         while not stopping.is_set():
             tasks = {task for task in tasks if not task.done()}
@@ -82,13 +89,14 @@ async def run():
                 raise RuntimeError('后台心跳已意外结束')
             await processor.recover()
             await knowledge.recover()
+            await personal.recover()
             if len(tasks)<settings.worker_concurrency:
-                queues = [knowledge,processor] if prefer_knowledge else [processor,knowledge]
-                prefer_knowledge = not prefer_knowledge
                 claimed = False
-                for queue in queues:
+                for offset in range(len(queues)):
+                    queue=queues[(queue_cursor+offset)%len(queues)]
                     task_run = await queue.claim()
                     if task_run:
+                        queue_cursor=(queue_cursor+offset+1)%len(queues)
                         tasks.add(asyncio.create_task(queue.process(task_run)))
                         claimed = True
                         break
@@ -111,6 +119,8 @@ async def run():
         await web.close()
         await gateway.close()
         await index.close()
+        await private_index.close()
+        await long_memory.close()
         await pool.close()
 
 

@@ -42,7 +42,8 @@ export interface ChatMessage {
   citations?: Citation[];
   attachments?: AnalysisAttachment[];
 }
-export interface Citation { type?: 'knowledge' | 'web' | 'business' | 'sandbox'; result_id?: string; label: string; chunk_id?: string; document_id?: string; filename?: string; page?: number | null; heading?: string | null; position?: number;
+export interface Citation { type?: 'knowledge' | 'web' | 'business' | 'sandbox' | 'memory'; result_id?: string; label: string; chunk_id?: string; document_id?: string; filename?: string; page?: number | null; heading?: string | null; position?: number;
+  remembered_at?: string; topic_id?: string;
   source_id?: string; title?: string; url?: string; website?: string; published_at?: string | null; fetched_at?: string;
   content_kind?: 'search_snippet' | 'provider_excerpt' | 'page_text'; page_read?: boolean; truncated?: boolean;
   page_numbers?: number[] | null; heading_path?: {level:number;title:string}[] | null; }
@@ -57,7 +58,7 @@ export function citationPages(source: Citation): string {
 
 /** 接收内部或公开引用，返回可读来源标签；不将网页标题冒充内部文件名。 */
 export function citationTitle(source: Citation): string {
-  return source.type==='sandbox' ? `文件 · ${source.title || '分析结果'}` : source.type==='business' ? '业务 · 查询结果' : source.type==='web' ? `公开 · ${source.title || source.website || '网页'}` : `内部 · ${source.filename || '知识文档'}`;
+  return source.type==='memory' ? `个人记忆 · ${source.title || '项目'}` : source.type==='sandbox' ? `文件 · ${source.title || '分析结果'}` : source.type==='business' ? '业务 · 查询结果' : source.type==='web' ? `公开 · ${source.title || source.website || '网页'}` : `内部 · ${source.filename || '知识文档'}`;
 }
 export interface ConversationDetail { conversation_id: string; title: string; messages: ChatMessage[]; active_run: ChatRun | null; last_run: ChatRun | null; }
 export interface ChatEvent { sequence: number; run_id: string; trace_id: string; timestamp: string; type: string; data: {text?: string; message?: string; model?: string; slot?: string; attempt?: number; next_attempt?: number; status?: ChatRun['status']; error?: ChatRun['error']; action?: SensitiveAction}; }

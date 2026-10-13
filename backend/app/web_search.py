@@ -177,6 +177,17 @@ def outbound_query(current_input: str, secrets: tuple[str,...]=()) -> str:
     return query
 
 
+def public_location_context(current_input,personal):
+    """接收原始当前问题和服务器本人概要，仅在本地指代时返回粗略城市；不外发画像/项目或精确住址。"""
+    if not re.search(r'我的所在地|我的位置|我所在|我住的|我附近|我这(?:里|边)|这里|当地|^附近|(?:推荐|找|查)[一下些]*附近',current_input):return {}
+    explicit=re.search(r'我(?:现在|目前)?(?:住在|在|位于)\s*([\u4e00-\u9fffA-Za-z ·-]{2,24}?)(?=[，。；！？\s]|附近|$)',current_input)
+    location=explicit[1] if explicit else personal.get('runtime_fields',{}).get('location') or personal.get('profile',{}).get('location')
+    if not isinstance(location,str) or not re.fullmatch(r'[\u4e00-\u9fffA-Za-z ·-]{2,24}',location):return {}
+    if re.search(r'街|路|号|栋|室|小区|公司|办公室|密码|密钥',location):return {}
+    check_public_input(location)
+    return {'city':location}
+
+
 class WebSearchService:
     """真实IQS查询及本人来源快照，采用固定提供商、不启用缓存，错误返回实际状态。"""
     def __init__(self, pool, settings, audit, client=None, reader=None):
@@ -194,12 +205,14 @@ class WebSearchService:
         if self.query_gateway:
             await self.query_gateway.close()
 
-    async def public_keywords(self, task, run):
+    async def public_keywords(self, task, run, public_context=None):
         """接收已投影的公开任务及可信运行，用独立无历史/无工具上下文提炼关键词；返回受限查询。"""
+        city=(public_context or {}).get('city')
+        if city:check_public_input(city,self.audit.secrets)
         if self.query_gateway is None:
-            return task
-        messages=[{'role':'system','content':'你是公开搜索关键词提炼器。输入仅是用户允许公开查询的任务，不含内部工具信息。提炼一条简短自然的搜索关键词，保留产品/型号和时效，去除礼貌、回答格式要求。只返回JSON：{"query":"关键词"}。不回答问题，不输出其他内容，不调用工具。'},
-                  {'role':'user','content':task}]
+            return (city+' '+task) if city else task
+        messages=[{'role':'system','content':'你是公开搜索关键词提炼器。输入是用户本次公开任务和服务器解析的可选粗略城市，不含内部工具或其他个人信息。遇到所在地/附近等指代时必须用city替换，最终关键词保留city原词，不保留未解析的附近，不猜其他城市。提炼一条简短自然关键词，保留产品/型号和时效，去除礼貌与回答格式要求。只返回JSON：{"query":"关键词"}。不回答、不输出其他内容、不调用工具。'},
+                  {'role':'user','content':json.dumps({'public_task':task,'city':city},ensure_ascii=False) if city else task}]
         async def record(kind,data,usage):
             """接收实际查询提炼协议和用量，将其作为当前run子步骤永久审计，不伪造主回答。"""
             await self.audit.append(run['trace_id'],'web.query_'+kind,data,user_id=run['user_id'],run_id=run['run_id'],usage=usage,
@@ -215,16 +228,18 @@ class WebSearchService:
         except (ValueError,KeyError,TypeError):
             raise SearchError('WEB_QUERY_FORMAT','公开关键词生成未完成，请提供更明确的公开主题') from None
         check_public_input(value,self.audit.secrets)
+        # 城市为服务端最小投影；模型改写不能丢失它，候选不含城市时后端补回。
+        if city and city not in value:value=city+' '+value
         return value
 
-    async def search(self, current_input, context, run):
+    async def search(self, current_input, context, run, public_context=None):
         """接收用户本次输入与可信身份/任务，轻量校验并独立生成公开关键词，返回来源；不接收RAG、SQL或主Agent候选。"""
         context = await live_context(self.pool,context.user_id,context.session_id)
         public_task = outbound_query(current_input,self.audit.secrets)
         settings = self.settings
         if settings.web_search_provider!='aliyun_iqs' or settings.web_search_engine_type!='CNLiteBasic' or settings.web_search_base_url.rstrip('/')!='https://cloud-iqs.aliyuncs.com' or not settings.web_search_api_key.get_secret_value():
             raise SearchError('WEB_NOT_CONFIGURED','阿里云LiteBasic搜索尚未正确配置')
-        query = await self.public_keywords(public_task,run)
+        query = await self.public_keywords(public_task,run,public_context)
         context = await live_context(self.pool,context.user_id,context.session_id)
         search_id = new_id()
         # 用户级配额领取与持久请求记录在同一事务内，避免并发绕过限制。
@@ -238,7 +253,7 @@ class WebSearchService:
                                    search_id,context.user_id,run['conversation_id'],run['run_id'],query)
                 body = {'query':query,'engineType':'CNLiteBasic','contents':{'mainText':True,'summary':False,'markdownText':False,'rerankScore':True},
                         'advancedParams':{'numResults':settings.web_search_max_results}}
-                await self.audit.append(run['trace_id'],'web.request',{'search_id':search_id,'public_task':public_task,'outbound_query':query,'query_origin':'isolated_current_user_public_clause','request':body},
+                await self.audit.append(run['trace_id'],'web.request',{'search_id':search_id,'public_task':public_task,'public_context':public_context or {},'outbound_query':query,'query_origin':'current_public_task_with_optional_own_city','request':body},
                                         user_id=context.user_id,run_id=run['run_id'],connection=conn)
         try:
             async with asyncio.timeout(settings.web_search_timeout_seconds):
@@ -281,7 +296,7 @@ class WebSearchService:
             await live_context(self.pool,context.user_id,context.session_id)
             output = {'search_id':search_id,'query':query,'citations':sources,'status':'completed' if sources else 'no_results','cost_source':'reported' if raw.get('costCredits') else 'unavailable',
                       'cost_credits':raw.get('costCredits'),'message':'已取得公开来源；片段不等于完整网页，日期未知时保持空值' if sources else '公开搜索没有可用结果，不能虚构网页来源'}
-            output['query_policy']='查询由独立的用户公开任务生成，重复调用不保证获得新内容；已取得来源足够时直接回答，片段缺少细节则说明限制，不反复搜索凑确定答案。'
+            output['query_policy']='实际外发搜索词以本回执query为准，主模型候选不是实际搜索词；输入仅本次公开任务及可选本人粗略城市。重复调用复用本轮结果，来源不匹配时不能凭候选归因供应商。'
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
                     await conn.execute('UPDATE app_runtime.web_searches SET status=$1,response_json=$2 WHERE search_id=$3',output['status'],output,search_id)

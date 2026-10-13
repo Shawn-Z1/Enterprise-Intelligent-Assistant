@@ -123,15 +123,19 @@ class RagIndex:
             filters.append('(ARRAY_CONTAINS(departments, "*") or ARRAY_CONTAINS(departments, '+json.dumps(context.department_id)+'))')
         filters.extend('ARRAY_CONTAINS(identifiers, '+json.dumps(value)+')' for value in identifiers(query))
         expression = ' and '.join(filters)
-        fields = ['document_id', 'space', 'index_version']
+        dense,sparse = await self.search_branches(query,vector,expression,['document_id','space','index_version'])
+        return dense,sparse,expression
+
+    async def search_branches(self, query, vector, expression, fields):
+        """接收问题/向量、服务端过滤式和返回字段，复用真实dense与BM25双路召回；返回统一切片排名。"""
         dense, sparse = await asyncio.gather(
             asyncio.to_thread(self.client.search, collection_name=self.collection, data=[vector], anns_field='dense', filter=expression,
                               limit=self.settings.rag_recall_limit, output_fields=fields, search_params={'metric_type':'COSINE', 'params':{'ef':100}}),
             asyncio.to_thread(self.client.search, collection_name=self.collection, data=[query], anns_field='sparse', filter=expression,
                               limit=self.settings.rag_recall_limit, output_fields=fields, search_params={'metric_type':'BM25', 'params':{}}))
         convert = lambda results: [{'chunk_id':row.get('id',row.get('chunk_id')), 'score':float(row['distance']), 'rank':rank,
-                                     'document_id':row['entity']['document_id']} for rank,row in enumerate(results[0],1)]
-        return convert(dense), convert(sparse), expression
+                                     **row['entity']} for rank,row in enumerate(results[0],1)]
+        return convert(dense), convert(sparse)
 
     async def rerank(self, query: str, chunks: list[dict]) -> dict:
         """接收问题及 PG 复核后的候选正文，调用独立交叉编码器，返回真实语义得分，不复用 RRF 充当重排。"""

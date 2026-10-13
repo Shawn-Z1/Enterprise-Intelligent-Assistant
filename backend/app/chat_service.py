@@ -98,7 +98,7 @@ class RunWriter:
                     await conn.execute('UPDATE app_runtime.model_attempts SET status=$1,response_json=$2 WHERE attempt_id=$3',
                         'completed' if kind=='model.response' else ('interrupted' if kind=='model.interrupted' else 'failed'),cleaned,attempt)
                 await self.audit.append(self.run['trace_id'],kind,cleaned,span_id=attempt or self.run['run_id'],
-                    parent_span_id=self.run['run_id'] if attempt else None,span_name='model.attempt' if attempt else 'chat.run',
+                    parent_span_id=getattr(self,'model_parent_span',self.run['run_id']) if attempt else None,span_name='model.attempt' if attempt else 'chat.run',
                     user_id=self.run['user_id'],conversation_id=self.run['conversation_id'],run_id=self.run['run_id'],
                     usage=usage,duration_ms=data.get('duration_ms'),connection=conn)
 
@@ -122,6 +122,8 @@ class RunWriter:
                                 'usage':result.usage.model_dump(mode='json'),'finish_reason':result.finish_reason}
                     await conn.execute('''INSERT INTO app_runtime.messages(message_id,conversation_id,user_id,role,content,protocol_json,run_id)
                         VALUES($1,$2,$3,'assistant',$4,$5,$6)''',message_id,self.run['conversation_id'],self.run['user_id'],result.content,protocol,self.run['run_id'])
+                    from app.long_term_memory import enqueue_memory
+                    await enqueue_memory(conn,self.run,message_id)
                     payload.update(message_id=message_id,model=result.model,slot=result.slot,usage=result.usage.model_dump(mode='json'),finish_reason=result.finish_reason)
                 state = {**row['state_json'],**payload,'audit_pending':False}
                 await conn.execute('UPDATE app_runtime.runs SET status=$1,state_json=$2,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE run_id=$3',status,state,self.run['run_id'])
@@ -134,12 +136,14 @@ class RunWriter:
 class ChatProcessor:
     """后台会话执行器，生产使用真实 LangGraph 工具循环；任务、原消息和事件持久化，模型统一走网关。"""
 
-    def __init__(self, pool, settings, gateway: ModelGateway, audit: AuditRecorder, worker_id: str | None = None, rag=None, web=None):
+    def __init__(self, pool, settings, gateway: ModelGateway, audit: AuditRecorder, worker_id: str | None = None, rag=None, web=None, long_memory=None):
         """接收连接池、运行配置、网关和审计，保存 worker 标识；允许隔离测试复用真实执行代码。"""
         self.pool,self.settings,self.gateway,self.audit = pool,settings,gateway,audit
         self.worker_id = worker_id or new_id()
         self.rag = rag
         self.web = web
+        # 私人概要与检索服务独立于企业RAG权限，实例不保存某个用户的可变资料。
+        self.long_memory=long_memory
         self.hook=HumanSecondaryConfirmationHook(pool,audit)
         from app.sandbox_service import SandboxService
         self.sandbox=SandboxService(pool,settings,audit,self.hook) if settings.sandbox_enabled else None
@@ -214,15 +218,18 @@ class ChatProcessor:
         memory=ContextMemory(self.pool,self.settings,self.gateway,writer)
         try:
             rows = await memory.history()
+            personal=await self.long_memory.overview(run['user_id']) if self.long_memory else {}
+            await self.audit.append(run['trace_id'],'memory.overview_injected',{'overview':personal},user_id=run['user_id'],run_id=run['run_id'])
             await writer.emit('context.cache',{'message':'已读取会话工作上下文','cache_status':memory.last_cache_status})
             assembler = ContextAssembler([dict(row) for row in rows],run['run_id'],self.settings.model_output_tokens)
             # 普通文本路径也保持同一任务的时间信息固定，不随重新领取变化。
             assembler.timestamp=run['created_at'].isoformat()
+            assembler.personal_memory=personal
             remaining=self.settings.run_timeout_seconds-run['state_json'].get('active_elapsed',0)
             async with asyncio.timeout(max(0.01,remaining)):
                 if self.rag:
                     from app.rag_agent import RagAgent
-                    result = await RagAgent(self,self.rag,writer,[dict(row) for row in rows],memory=memory).run()
+                    result = await RagAgent(self,self.rag,writer,[dict(row) for row in rows],memory=memory,personal=personal).run()
                 else:
                     async def factory(slot):
                         """接收目标槽位，用本任务缓存/摘要生成可发送历史；普通文本路径也不能绕过压缩预算。"""
