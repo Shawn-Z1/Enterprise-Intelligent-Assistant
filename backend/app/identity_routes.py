@@ -159,8 +159,8 @@ async def knowledge_gate(body: ToolRequest,request: Request,context: AuthContext
 
 @router.get("/admin/audit/status")
 async def audit_status(context: AuthContext = Depends(admin_context)):
-    """接收可信管理员，只验证审计管理入口权限；查询工作台未实现时明确返回 501。"""
-    raise auth_error(501,"FEATURE_NOT_READY","管理员审计查询页面将在后续阶段开放")
+    """接收可信管理员，返回已实现的只读审计能力，不提供修改/删除或任务执行入口。"""
+    return {'status':'ready','read_only':True,'features':['traces','events','usage','related_jobs','export']}
 
 
 @router.post("/tools/query_business_data")

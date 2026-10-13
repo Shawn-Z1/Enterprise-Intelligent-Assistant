@@ -71,6 +71,7 @@ x-backend-env: &backend-env
   KNOWLEDGE_PARSE_TIMEOUT_SECONDS: ${KNOWLEDGE_PARSE_TIMEOUT_SECONDS:-30}
   RETRIEVAL_MODEL_URL: http://retrieval-models:8090
   RAG_CHUNK_SIZE: ${RAG_CHUNK_SIZE:-600}
+  RAG_COLLECTION_PREFIX: ${RAG_COLLECTION_PREFIX:-knowledge_chunks}
   RAG_CHUNK_OVERLAP: "0"
   RAG_RECALL_LIMIT: ${RAG_RECALL_LIMIT:-20}
   RAG_RERANK_LIMIT: ${RAG_RERANK_LIMIT:-20}
@@ -186,7 +187,7 @@ services:
 
   api:
     build: ./backend
-    image: zhixing-backend:0.11.2
+    image: zhixing-backend:0.12.0
     environment: *backend-env
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
@@ -200,7 +201,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: zhixing-backend:0.11.2
+    image: zhixing-backend:0.12.0
     build: ./backend
     command: ["python", "-m", "app.worker"]
     deploy:
@@ -217,9 +218,33 @@ services:
     restart: unless-stopped
 
   # 显式管理任务：外置迁移和种子只读挂载，不在应用启动时自动导入。
+  maintenance:
+    profiles: [tools]
+    image: zhixing-maintenance:0.12.0
+    build:
+      context: ./backend
+      dockerfile: maintenance.Dockerfile
+    # 管理凭证仅供一次性维护；应用和worker仍使用最小权限身份。
+    environment:
+      <<: *backend-env
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      APP_DB_USER: ${APP_DB_USER:-zhixing_app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD}
+      INITIAL_DEMO_PASSWORD: ${INITIAL_DEMO_PASSWORD}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ${MAINTENANCE_DIR:-./backups/current}:/backup
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
   db-admin:
     profiles: ["tools"]
-    image: zhixing-backend:0.11.2
+    image: zhixing-backend:0.12.0
     build: ./backend
     entrypoint: ["python", "-m", "app.db_admin"]
     environment:
@@ -334,7 +359,6 @@ services:
 
   minio:
     image: doristhirdpartydocker/minio:RELEASE.2024-11-07T00-52-20Z
-    pull_policy: never
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -355,7 +379,6 @@ services:
   minio-init:
     # 复用已验证镜像自带的 mc，避免再拉取当前不可用的独立 mc 镜像。
     image: doristhirdpartydocker/minio:RELEASE.2024-11-07T00-52-20Z
-    pull_policy: never
     entrypoint: ["/bin/sh", "/bootstrap/init.sh"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
