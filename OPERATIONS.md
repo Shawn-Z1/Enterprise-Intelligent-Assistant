@@ -4,16 +4,16 @@
 
 ## 部署与健康检查
 
-| 环境 | 后端容器＋Vite | 全容器 |
-| --- | --- | --- |
-| PowerShell | `./scripts/deploy.ps1 -LocalFrontend` | `./scripts/deploy.ps1` |
-| Linux | `sh scripts/deploy.sh --local-frontend` | `sh scripts/deploy.sh` |
+| 环境 | 全容器部署 |
+| --- | --- |
+| PowerShell | `./scripts/deploy.ps1` |
+| Linux | `sh scripts/deploy.sh` |
 
-本地前端另在 `frontend` 运行 `pnpm install --frozen-lockfile` 和 `npm run dev`，无需宿主 Python。PowerShell 5.1 若出现中文编码问题，使用 PowerShell 7；不要忽略失败继续启动。
+部署脚本自动启用 `production` profile，前端在镜像中构建并由 Nginx 提供网页，宿主无需 Python 或 Node.js。PowerShell 5.1 若出现中文编码问题，使用 PowerShell 7；不要忽略失败继续启动。
 
 ```sh
 docker compose config --quiet
-docker compose ps
+docker compose --profile production ps
 docker compose logs --tail=80 api worker sandbox-runner
 docker compose logs --tail=80 models-init retrieval-models
 ```
@@ -22,12 +22,14 @@ docker compose logs --tail=80 models-init retrieval-models
 
 | 入口 | 默认地址 | 说明 |
 | --- | --- | --- |
-| 网页 | http://127.0.0.1:8080 | Vite 或生产 Nginx，二选一 |
+| 网页 | http://127.0.0.1:8080 | Nginx 网页入口 |
 | API 就绪 | http://127.0.0.1:8000/api/health/ready | 检查依赖，不调用付费模型 |
 | MinIO 管理 | http://127.0.0.1:9001 | 使用 MinIO root 凭证 |
-| PostgreSQL | 127.0.0.1:5432 | 管理工具本机连接 |
+| PostgreSQL | `127.0.0.1:5432` | PostgreSQL 协议，用 Navicat、psql 等数据库客户端连接 |
 
-端口由 `DEV_PORT`、`WEB_PORT`、`API_HOST_PORT`、`MINIO_CONSOLE_PORT`、`POSTGRES_HOST_PORT` 配置。首次下载需要访问镜像源、包源、GitHub 和 Hugging Face。`MODEL_DOWNLOAD_ENDPOINT` 可改为部署方信任、可提供相同固定文件的 HTTPS 端点，仍校验 SHA-256。
+网页、API、MinIO 管理台提供 HTTP 服务；PostgreSQL 使用专用数据库协议，地址不是网页 URL，不加 `http://`。数据库客户端分别填写主机、端口、数据库名、用户名和密码；支持连接串的客户端也可使用 `postgresql://`，不要把带密码的连接串公开。
+
+端口由 `WEB_PORT`、`API_HOST_PORT`、`MINIO_CONSOLE_PORT`、`POSTGRES_HOST_PORT` 配置。首次下载需要访问镜像源、包源、GitHub 和 Hugging Face。`MODEL_DOWNLOAD_ENDPOINT` 可改为部署方信任、可提供相同固定文件的 HTTPS 端点，仍校验 SHA-256。
 
 ## 初始化与升级
 
@@ -35,14 +37,40 @@ docker compose logs --tail=80 models-init retrieval-models
 
 `schema_migrations` 校验结构文件哈希，`seed_receipts` 记录种子。已有 `short_ids/` 回执时沿用旧种子，不删除账号或重置权限；旧种子目录只为兼容，不是开发数据库导出。修改 `.env` 初始密码不会修改已创建账号，后续从个人中心改密。
 
-更新代码前备份，然后重跑对应部署脚本。历史迁移和已应用种子不能直接改动；升级通过追加版本完成。日常 CSS/组件调整复用 Vite 热更新。
+更新代码前备份，然后重跑对应部署脚本。历史迁移和已应用种子不能直接改动；升级通过追加版本完成。
 
 ```sh
 docker compose stop
-docker compose up -d --wait
+docker compose --profile production up -d --wait
 ```
 
-这是已初始化系统的停止/恢复，不删除数据。生产恢复加 `--profile production`；Vite 在其终端 Ctrl+C 停止。不要把 `docker compose down -v` 当日常停机，它会删除数据卷。
+这是已初始化系统的停止/恢复，不删除数据。不要把 `docker compose down -v` 当日常停机，它会删除数据卷。
+
+## 扩容配置
+
+修改 `.env` 后执行：
+
+```sh
+docker compose --profile production up -d --wait
+```
+
+| 参数 | 默认 | 含义 |
+| --- | --- | --- |
+| `WORKER_REPLICAS` / `WORKER_CONCURRENCY` | 2 / 2 | Worker 数量 / 每实例任务片段并发 |
+| `SANDBOX_RUNNER_REPLICAS` / `SANDBOX_RUNNER_CONCURRENCY` | 2 / 1 | Runner 数量 / 每实例 Guest 容量 |
+| `SANDBOX_GLOBAL_CONCURRENCY` / `SANDBOX_USER_CONCURRENCY` | 2 / 1 | 全局 / 每用户沙箱执行上限 |
+| `SANDBOX_QUEUE_LIMIT` / `SANDBOX_WAIT_SECONDS` | 50 / 300 | 队列容量 / 最长排队秒数 |
+| `CONTEXT_COMPRESS_TRIGGER_RATIO` / `CONTEXT_KEEP_TURNS` | 0.75 / 4 | 压缩触发比例 / 保留轮次 |
+
+多个 Runner 不要设置同一个 `SANDBOX_RUNNER_ID`，默认使用容器自身身份。只增加 Runner 数量但不提高全局额度，不会提高实际沙箱并发上限。当前多副本限同一 Docker 引擎，扩容仍受宿主资源、数据库连接、供应商限流和全局额度约束。
+
+上下文压缩比例和保留轮次影响模型输入预算，不直接增加执行容量；修改它们时应同时核对模型窗口与输出预算。
+
+## 本地开发（维护者）
+
+维护者日常前端开发仍可使用 Vite 热更新，不改变公开部署的全容器入口。先用 `./scripts/deploy.ps1 -LocalFrontend`（Windows）或 `sh scripts/deploy.sh --local-frontend`（Linux）启动后端，再在 `frontend` 执行 `pnpm install --frozen-lockfile` 和 `npm run dev`。此方式需要本机 Node.js 与 pnpm，开发端口由 `DEV_PORT` 控制。
+
+Vite 与容器网页默认都占用 8080，不能同时占用同一端口；切换到本地开发前可用 `docker compose --profile production stop web` 停止网页容器。样式修改直接热更新，不反复重建 `web` 镜像；Vite 在其终端用 Ctrl+C 停止。
 
 ## 公网访问
 
