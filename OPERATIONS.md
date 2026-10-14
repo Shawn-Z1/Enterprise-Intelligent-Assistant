@@ -1,78 +1,108 @@
-# 容器部署与备份恢复（M12 / 0.12.0）
+# 部署与运维
 
-## 首次部署或升级
+首次安装见 [README](README.md#快速启动)。以下命令在项目根目录执行；操作已有数据前先备份。
 
-Linux服务器需要Docker Engine、Compose插件和可访问的固定镜像/依赖/模型下载源。普通API、worker及Guest不使用宿主Python/Node环境；当前实际验收是Windows Docker Desktop中的Linux/x86_64引擎，独立物理Linux与ARM未实测。
+## 部署与健康检查
+
+| 环境 | 后端容器＋Vite | 全容器 |
+| --- | --- | --- |
+| PowerShell | `./scripts/deploy.ps1 -LocalFrontend` | `./scripts/deploy.ps1` |
+| Linux | `sh scripts/deploy.sh --local-frontend` | `sh scripts/deploy.sh` |
+
+本地前端另在 `frontend` 运行 `pnpm install --frozen-lockfile` 和 `npm run dev`，无需宿主 Python。PowerShell 5.1 若出现中文编码问题，使用 PowerShell 7；不要忽略失败继续启动。
 
 ```sh
-sh scripts/init-env.sh
-# 编辑.env，填写主/备用/审核模型和公开搜索API配置。
-sh scripts/deploy.sh
+docker compose config --quiet
+docker compose ps
+docker compose logs --tail=80 api worker sandbox-runner
+docker compose logs --tail=80 models-init retrieval-models
 ```
 
-部署脚本先构建API，然后构建维护工具与预备Guest镜像；启动存储与固定CPU模型，显式执行迁移和幂等种子，再启用production前端。已有结构只能追加迁移，不能修改旧迁移。首次构建需要下载，不承诺离线冷启动；之后可保留镜像和模型卷复用。
+`config --quiet` 仅验证配置。完整 `docker compose config` 会展开凭证，不要公开输出；日志和审计也可能含用户正文。
 
-web默认绑定127.0.0.1，服务器远程访问通过反向代理/TLS，HTTPS部署应设置`SESSION_COOKIE_SECURE=true`。维护与存储端口不直接向公网开放。日常前端仍使用本地`npm run dev`，生产验收才启动web容器。
+| 入口 | 默认地址 | 说明 |
+| --- | --- | --- |
+| 网页 | http://127.0.0.1:8080 | Vite 或生产 Nginx，二选一 |
+| API 就绪 | http://127.0.0.1:8000/api/health/ready | 检查依赖，不调用付费模型 |
+| MinIO 管理 | http://127.0.0.1:9001 | 使用 MinIO root 凭证 |
+| PostgreSQL | 127.0.0.1:5432 | 管理工具本机连接 |
 
-Runner持有专用Docker引擎socket，API/worker和Guest均不持有；Guest逐任务创建/销毁、断网、无应用凭证、输入只读并有CPU/内存/进程配额。普通容器共享内核，没有gVisor。当前多副本调度限同一Docker引擎，跨宿主属于后续设计。
+端口由 `DEV_PORT`、`WEB_PORT`、`API_HOST_PORT`、`MINIO_CONSOLE_PORT`、`POSTGRES_HOST_PORT` 配置。首次下载需要访问镜像源、包源、GitHub 和 Hugging Face。`MODEL_DOWNLOAD_ENDPOINT` 可改为部署方信任、可提供相同固定文件的 HTTPS 端点，仍校验 SHA-256。
 
-## 维护窗口备份
+## 初始化与升级
 
-先完成正在执行的业务。脚本依次停止worker、Runner、API，保留PG/MinIO；导出PG17自定义档案及整个应用文件Bucket，保存表行数、PG档案和每个对象的SHA清单；结束或失败后恢复原先运行的服务。不会导出.env、模型API Key、Redis或Milvus物理卷。
+新安装加载 `database/seeds_release/`：一个 `admin` 登录身份，其余职员仅为无登录身份的虚构业务记录；知识库、对话、附件和个人记忆为空。
 
-维护工具是单独的一次性镜像，API/worker不持有PG/MinIO管理员凭证。维护镜像依赖已构建的同版本API镜像：
+`schema_migrations` 校验结构文件哈希，`seed_receipts` 记录种子。已有 `short_ids/` 回执时沿用旧种子，不删除账号或重置权限；旧种子目录只为兼容，不是开发数据库导出。修改 `.env` 初始密码不会修改已创建账号，后续从个人中心改密。
+
+更新代码前备份，然后重跑对应部署脚本。历史迁移和已应用种子不能直接改动；升级通过追加版本完成。日常 CSS/组件调整复用 Vite 热更新。
+
+```sh
+docker compose stop
+docker compose up -d --wait
+```
+
+这是已初始化系统的停止/恢复，不删除数据。生产恢复加 `--profile production`；Vite 在其终端 Ctrl+C 停止。不要把 `docker compose down -v` 当日常停机，它会删除数据卷。
+
+## 公网访问
+
+默认只绑定本机。使用 HTTPS 反向代理转发到生产 Web 的 `127.0.0.1:8080`，保留原始 Host，关闭事件流缓冲并支持长连接。HTTPS 下设置 `SESSION_COOKIE_SECURE=true`，确保后端取得可信、正确的原始协议和 Host；按实际代理链验证 Cookie、登录、上传和 SSE 后再开放。
+
+不要直接公开存储端口、MinIO 控制台或 Runner。Runner 持有 Docker socket，建议使用专用宿主/引擎；当前不启用 gVisor。域名、证书、防火墙及可信代理链由部署方配置，Compose 不自动申请 TLS。
+
+## 备份
+
+先让进行中的任务结束。脚本停止本项目 Worker、Runner、API，导出 PostgreSQL 17 自定义档案及整个应用 Bucket，保存表数量与对象 SHA；成功或失败后尝试恢复原服务。Redis、Milvus 不做物理备份，恢复时重建。
 
 ```sh
 docker compose build api
 docker compose --profile tools build maintenance
-sh scripts/backup.sh backups/20261013
+sh scripts/backup.sh backups/manual-backup
+```
+
+Windows：`./scripts/backup.ps1 -Directory backups/manual-backup`。目录必须为空，不覆盖旧备份。有 `manifest.json` 且以下校验通过才是完整备份：
+
+```sh
+MAINTENANCE_DIR=./backups/manual-backup docker compose --profile tools run --rm --no-deps maintenance validate
+```
+
+PowerShell 先设置 `$env:MAINTENANCE_DIR='./backups/manual-backup'`，再运行相同的 `docker compose ... maintenance validate`。
+
+备份含正文、密码哈希和审计，需受控保存、按需加密及异地备份，不得上传 Git。SHA 校验完整性，不证明外部备份可信。
+
+## 恢复到全新目标
+
+```sh
+sh scripts/restore.sh backups/manual-backup zhixing_restored application-restored
 ```
 
 Windows：
 
 ```powershell
-./scripts/backup.ps1 -Directory backups/20261013
+./scripts/restore.ps1 -Directory backups/manual-backup -Database zhixing_restored -Bucket application-restored
 ```
 
-备份目录必须为空；未完成的备份不覆盖旧备份。只有`manifest.json`生成且validate通过才视为完整：
+已有数据库/Bucket 拒绝覆盖。先校验 SHA，再建新目标、恢复数据、核验数量和对象内容、重建独立索引。旧登录、SQL 批准和未完成任务不会自动恢复为可执行；历史保留。索引重建需原检索模型空间匹配。
 
-```sh
-MAINTENANCE_DIR=./backups/20261013 docker compose --profile tools run --rm --no-deps maintenance validate
-```
+只有成功生成 `restore-receipt.json` 才能切换。`restore.compose.json` 含新凭证，不得提交。失败保留新目标供排查，不启动半恢复环境。
 
-备份含业务正文、密码哈希和审计，放在受控磁盘，按部署要求另行加密及异地保留。Linux使用严格umask，Windows依靠本地ACL。SHA证明完整性，不证明外部备份可信；仅恢复本系统生成且可信的PG档案。
-
-## 全新目标恢复
-
-```sh
-sh scripts/restore.sh backups/20261013 zhixing_restore_20261013 application-restore-20261013
-```
-
-```powershell
-./scripts/restore.ps1 -Directory backups/20261013 -Database zhixing_restore_20261013 -Bucket application-restore-20261013
-```
-
-目标库名使用小写字母/数字/下划线且最多38字符；Bucket使用小写字母/数字/连字符。不得和源目标相同，已有库/Bucket一律拒绝覆盖。先核对所有SHA，再创建新库和新Bucket。PG原始表数量在任何恢复状态调整前核对；每个恢复文件重新读取验证SHA。
-
-新Bucket创建独立最小权限应用身份，不扩大原应用凭证权限。所有文档的可变集合指针（含已失效/删除中）先改到新集合，防止清理作业访问源索引。Milvus只重建仍有效的知识/私人切片到独立集合，使用备份时固定的真实CPU模型空间；模型空间不同则停止。Redis使用新数据库命名空间从PG重建，不清空源Redis。
-
-旧登录全部失效；未完成run标中断，未消费SQL批准失效，旧沙箱任务标未知，不重复执行。原消息/代码/确认/产物/审计保留。恢复配置使用新的沙箱state/input卷，旧Guest状态不带入新目标；新库旧额度释放不能当作原宿主旧容器已清理，旧容器由原Runner或管理员确认。
-
-最终输出`restore-receipt.json`和`restore.compose.json`。后者包含新的应用存储凭证，限制权限且排除Git；不要打印或公开共享。**只有成功回执产生后才能切换**，提前产生的配置不是成功证明。失败保留明确的新目标供排查，不自动删除或启动部分恢复环境。
-
-## 核验与人工切换
-
-先在隔离目标检查原表/审计数量和文件SHA，并实际预览、下载、知识/私人检索；然后在新的维护窗口切换应用：
+在新目标验证检索、预览与下载后，维护窗口内人工切换：
 
 ```sh
 docker compose stop worker
 docker compose stop sandbox-runner
 docker compose stop api
-docker compose -f compose.yaml -f backups/20261013/restore.compose.json up -d --wait api worker sandbox-runner
+docker compose -f compose.yaml -f backups/manual-backup/restore.compose.json up -d --wait api worker sandbox-runner
 ```
 
-该操作保持Compose入口及网络，应用改用新库/Bucket/集合/执行存储卷；web仍连接同一API地址。后续迁移/备份时必须同步.env的数据库、应用Bucket/新身份/集合前缀，或显式给管理服务传入相同目标；不要仍对旧库执行维护。`docker compose config`会展开凭证，不要把完整输出贴到终端或日志。
+后续迁移/备份同步 `.env` 的数据库、Bucket、应用凭证、集合前缀，或显式传入相同目标。新执行卷不代表原宿主旧 Guest 已清理，仍需原 Runner 或管理员确认。
 
-M12只读审计入口`./scripts/verify-m12.ps1`或`sh scripts/verify-m12.sh`运行新增边界测试。真实恢复验收脚本`backend/tests/verify_m12_restored.py`仅允许m12_restore_前缀库，检索/预览在本地容器完成；云模型验证使用新注册且无历史/记忆/业务与知识权限的虚构账号，避免将恢复资料外发。
+## 排查要点
 
-本地证据在`verification/M12/REPORT.md`。历史SQL确认、联网/RAG组合、附件转换、10任务排队、压缩和跨会话记忆复用前阶段已通过记录；不重新跑全格式/压力矩阵，不把有限验收声称为无限容量或任意宿主已验证。
+- **容器健康但模型失败**：健康接口不验证付费 API。核对主/审核模型 URL、Key、型号和限额，并查该轮审计。
+- **没有知识或记忆**：新库本就为空。知识要上传、处理并审核；长期记忆异步提取，无稳定信号可以不写入。
+- **网页正文读取失败**：搜索摘要与网页抓取是不同步骤，网络、DNS 和网站拒绝都可能影响正文；不能冒充已读全文。
+- **沙箱排队或不可用**：核对 Runner、Guest 镜像、并发额度、队列容量和等待时限，不改为在宿主运行代码。
+- **上下文超限**：核对实际模型窗口、输出预算和工具结果。20 MiB 文件上限不是模型可接收全文的保证。
+- **成员业务行不可读**：工具资格与员工行权限分开，注册用户不自动关联虚构员工；实际部署需可信身份映射。
+- **下载/构建失败**：检查容器内网络和各下载源；宿主联网不代表容器联网。保留数据，修复后重跑部署入口。

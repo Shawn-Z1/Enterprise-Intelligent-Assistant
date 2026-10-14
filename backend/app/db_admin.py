@@ -7,6 +7,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import Literal
 from app.ids import ShortId, new_id
 
 import asyncpg
@@ -32,7 +33,9 @@ class BootstrapSettings(BaseSettings):
     business_db_user: str = "zhixing_business_reader"
     business_db_password: SecretStr
     initial_admin_password: SecretStr
-    initial_demo_password: SecretStr
+    initial_demo_password: SecretStr = SecretStr("")
+    # 新安装默认只建管理员；旧版验收环境可显式选择完整虚构账号集。
+    seed_profile: Literal["release", "demo"] = "release"
     database_root: str = "/database"
 
 
@@ -97,7 +100,7 @@ async def provision_roles(conn: asyncpg.Connection, settings: BootstrapSettings)
 
 
 async def grant_runtime_access(conn: asyncpg.Connection, settings: BootstrapSettings) -> None:
-    """接收管理连接和配置，按 schema 授予应用权限和五张业务表的只读权限；无返回值。"""
+    """接收管理连接和配置，按 schema 授予应用权限及受保护业务视图只读权限；无返回值。"""
     app_role = identifier(settings.app_db_user)
     reader = identifier(settings.business_db_user)
     app_schemas = "app_system,app_runtime,app_knowledge,app_memory"
@@ -162,14 +165,17 @@ async def seed(conn: asyncpg.Connection, settings: BootstrapSettings) -> dict:
         await conn.execute("SELECT pg_advisory_xact_lock(8200201)")
         # 初始化脚本中的未标注时区时间统一按北京时间解释；不改已导入记录或历史文件指纹。
         await conn.execute("SET LOCAL TIME ZONE 'Asia/Shanghai'")
-        # 新版种子独立保存，历史文件及其指纹不变，兼容现有数据库升级和全新部署。
-        seed_root = Path(settings.database_root) / "seeds_short_ids"
+        # 已部署环境沿用原种子回执，不重写旧文件或重置身份；新安装只创建管理员。
+        legacy_seed = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM app_system.seed_receipts WHERE source_key LIKE 'short_ids/%')")
+        seed_profile = "demo" if legacy_seed else settings.seed_profile
+        seed_root = Path(settings.database_root) / ("seeds_short_ids" if seed_profile == "demo" else "seeds_release")
+        receipt_prefix = "short_ids/" if seed_profile == "demo" else "release/"
         for path in sorted(seed_root.iterdir()):
             if path.suffix not in (".sql", ".json"):
                 continue
             content = path.read_text(encoding="utf-8")
             digest = hashlib.sha256(content.encode()).hexdigest()
-            source_key = "short_ids/" + path.name
+            source_key = receipt_prefix + path.name
             existing = await conn.fetchval("SELECT sha256 FROM app_system.seed_receipts WHERE source_key=$1", source_key)
             if existing:
                 if existing != digest:

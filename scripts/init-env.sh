@@ -10,6 +10,7 @@ if not p.exists():
     text=Path('.env.example').read_text()
     while 'replace-with-random-password' in text:text=text.replace('replace-with-random-password',secrets.token_hex(32),1)
     p.write_text(text)
+    p.chmod(0o600)
 else:
     text=p.read_text()
     if not any(line.startswith('SANDBOX_CONTROL_TOKEN=') and line.split('=',1)[1].strip() for line in text.splitlines()):

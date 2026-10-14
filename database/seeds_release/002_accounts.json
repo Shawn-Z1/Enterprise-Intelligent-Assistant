@@ -1,0 +1,13 @@
+[
+  {
+    "user_id": "U1",
+    "username": "admin",
+    "display_name": "系统管理员",
+    "role": "admin",
+    "department_id": "D1",
+    "grade": 10,
+    "employee_id": "E1",
+    "knowledge_enabled": true,
+    "business_query_enabled": true
+  }
+]

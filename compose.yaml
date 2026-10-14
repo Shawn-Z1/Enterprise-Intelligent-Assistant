@@ -232,7 +232,7 @@ services:
       APP_DB_USER: ${APP_DB_USER:-zhixing_app}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD}
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD}
-      INITIAL_DEMO_PASSWORD: ${INITIAL_DEMO_PASSWORD}
+      INITIAL_DEMO_PASSWORD: ${INITIAL_DEMO_PASSWORD:-}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     volumes:
@@ -296,7 +296,8 @@ services:
       SANDBOX_WAIT_SECONDS: ${SANDBOX_WAIT_SECONDS:-300}
       RUN_LEASE_SECONDS: ${RUN_LEASE_SECONDS:-60}
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD}
-      INITIAL_DEMO_PASSWORD: ${INITIAL_DEMO_PASSWORD}
+      INITIAL_DEMO_PASSWORD: ${INITIAL_DEMO_PASSWORD:-}
+      SEED_PROFILE: release
       APP_MINIO_ENDPOINT: minio:9000
       APP_MINIO_ACCESS_KEY: ${APP_MINIO_ACCESS_KEY}
       APP_MINIO_SECRET_KEY: ${APP_MINIO_SECRET_KEY}
@@ -365,7 +366,7 @@ services:
     command: ["minio", "server", "/data", "--console-address", ":9001"]
     # 管理控制台仅供本机浏览；S3 数据接口仍只在容器内部网络提供。
     ports:
-      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio-data:/data
     healthcheck:
