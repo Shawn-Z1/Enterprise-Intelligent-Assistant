@@ -116,9 +116,43 @@ async def applications(request: Request,scope: Literal['mine','all']='mine',limi
         raise auth_error(403,'ADMIN_REQUIRED','仅管理员可管理全部申请')
     async with request.app.state.pool.acquire() as conn:
         rows = await conn.fetch('''SELECT a.*,d.document_id,d.status AS document_status,u.display_name AS creator_name FROM app_knowledge.applications a
-            LEFT JOIN app_knowledge.documents d USING(application_id) JOIN app_system.users u ON u.user_id=a.creator_user_id WHERE $1::boolean OR a.creator_user_id=$2
+            LEFT JOIN app_knowledge.documents d USING(application_id) JOIN app_system.users u ON u.user_id=a.creator_user_id WHERE a.management_deleted_at IS NULL AND ($1::boolean OR a.creator_user_id=$2)
             ORDER BY a.created_at DESC,a.application_id LIMIT $3 OFFSET $4''',scope=='all',context.user_id,limit,offset)
     return [metadata(dict(row),context) for row in rows]
+
+
+@router.get('/applications/catalog')
+async def application_catalog(request: Request,scope: Literal['mine','all']='mine',category: Literal['effective','review','processing','progress','failed','history']='effective',
+                              q: str=Query('',max_length=200),file_format: Literal['','pdf','docx','txt','md']='',department_id: ShortId | None=None,
+                              page: int=Query(1,ge=1),limit: int=Query(10,ge=1,le=50),context: AuthContext=Depends(current_context)):
+    """接收范围、分类、搜索和分页，在同一只读快照内先鉴权筛选，再统计与分页；成员仅查看本人且无管理员审核分类。"""
+    if not context.is_admin and (scope=='all' or category in ('review','processing')):
+        raise auth_error(403,'ADMIN_REQUIRED','普通成员仅可查看自己的提交进度')
+    # 分类以真实申请和索引状态为准，历史记录不混入生效列表，所有筛选均在分页前完成。
+    base = '''WITH catalog AS (SELECT a.*,d.document_id,d.status AS document_status,u.display_name AS creator_name,
+        CASE WHEN a.status IN ('invalidated','withdrawn','rejected') THEN 'history'
+             WHEN a.status='failed' OR (a.status='deleting' AND a.error_json IS NOT NULL) THEN 'failed'
+             WHEN a.status='pending_review' THEN 'review'
+             WHEN a.status='retrievable' AND d.status='retrievable' THEN 'effective'
+             ELSE 'processing' END AS category
+        FROM app_knowledge.applications a LEFT JOIN app_knowledge.documents d USING(application_id)
+        JOIN app_system.users u ON u.user_id=a.creator_user_id
+        WHERE a.management_deleted_at IS NULL AND ($1::boolean OR a.creator_user_id=$2)
+          AND ($3::text='' OR strpos(lower(a.filename||' '||u.display_name),lower($3))>0)
+          AND ($4::text='' OR a.file_format=$4)
+          AND ($5::varchar IS NULL OR cardinality(a.allowed_department_ids)=0 OR $5=ANY(a.allowed_department_ids))) '''
+    args = (scope=='all',context.user_id,q.strip(),file_format,department_id)
+    async with request.app.state.pool.acquire() as conn:
+        async with conn.transaction(isolation='repeatable_read',readonly=True):
+            counts = {key:0 for key in ('effective','review','processing','failed','history')}
+            counts.update({row['category']:row['count'] for row in await conn.fetch(base+'SELECT category,count(*) AS count FROM catalog GROUP BY category',*args)})
+            counts['progress'] = counts['review']+counts['processing']
+            total = counts[category]
+            page = min(page,max(1,(total+limit-1)//limit))
+            rows = await conn.fetch(base+'''SELECT * FROM catalog WHERE category=$6 OR ($6='progress' AND category IN ('review','processing'))
+                ORDER BY updated_at DESC,application_id LIMIT $7 OFFSET $8''',*args,category,limit,(page-1)*limit)
+    visible_counts = counts if context.is_admin else {key:counts[key] for key in ('effective','progress','failed','history')}
+    return {'items':[metadata(dict(row),context) for row in rows],'total':total,'counts':visible_counts,'page':page,'limit':limit}
 
 
 @router.get('/applications/{application_id}')
@@ -141,8 +175,12 @@ async def review(application_id: ShortId,body: ReviewBody,request: Request,conte
 
 
 @router.post('/applications/{application_id}/{action}')
-async def maintain(application_id: ShortId,action: Literal['withdraw','delete','retry'],request: Request,context: AuthContext=Depends(qualified)):
+async def maintain(application_id: ShortId,action: Literal['withdraw','delete','retry','remove-record'],request: Request,context: AuthContext=Depends(mutation_context)):
     """接收材料和明确维护动作，服务器验证所有者及状态；删除立即拒绝正文读取，后台完成失效。"""
+    if action=='remove-record':
+        await service(request).remove_record(application_id,context,request.state.trace_id)
+        return {'updated':True}
+    await qualified(request,context)
     if action=='retry':
         await service(request).retry(application_id,context,request.state.trace_id)
     else:

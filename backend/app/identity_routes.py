@@ -1,7 +1,8 @@
 import asyncio
+from typing import Literal
 from app.ids import ShortId
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from minio import Minio
 from minio.error import S3Error
@@ -118,6 +119,30 @@ async def staff_list(request: Request,context: AuthContext = Depends(admin_conte
             u.grade,u.position,u.employee_id,u.knowledge_enabled,u.business_query_enabled,u.permission_version
             FROM app_system.users u LEFT JOIN app_system.departments d ON d.department_id=u.department_id ORDER BY u.created_at,u.username""")
         return [dict(row) for row in rows]
+
+
+@router.get('/admin/users/catalog')
+async def staff_catalog(request: Request,q: str=Query('',max_length=200),department_id: ShortId | None=None,
+                        access: Literal['all','knowledge','business','unassigned']='all',page: int=Query(1,ge=1),
+                        limit: int=Query(10,ge=1,le=50),context: AuthContext=Depends(admin_context)):
+    """接收管理员、姓名/账号、部门与资格筛选，返回同一快照中的分页职员和总数；资格计算与实际权限一致。"""
+    # 显示有效资格而非孤立布尔开关，避免部门未分配的用户被错误标成已授权。
+    base = '''WITH catalog AS (SELECT u.user_id,u.username,u.display_name,u.role,u.status,u.department_id,d.name AS department_name,
+        u.grade,u.position,u.employee_id,u.knowledge_enabled,u.business_query_enabled,u.permission_version,
+        (u.status='active' AND (u.role='admin' OR (u.knowledge_enabled AND u.department_id IS NOT NULL AND u.grade IS NOT NULL))) AS can_use_knowledge,
+        (u.status='active' AND u.business_query_enabled AND (u.role='admin' OR (u.department_id IS NOT NULL AND u.grade IS NOT NULL))) AS can_query_business
+        FROM app_system.users u LEFT JOIN app_system.departments d ON d.department_id=u.department_id
+        WHERE ($1::text='' OR strpos(lower(u.display_name||' '||u.username),lower($1))>0)
+          AND ($2::varchar IS NULL OR u.department_id=$2)), filtered AS (SELECT * FROM catalog WHERE $3='all'
+          OR ($3='knowledge' AND can_use_knowledge) OR ($3='business' AND can_query_business)
+          OR ($3='unassigned' AND (department_id IS NULL OR grade IS NULL))) '''
+    args = (q.strip(),department_id,access)
+    async with request.app.state.pool.acquire() as conn:
+        async with conn.transaction(isolation='repeatable_read',readonly=True):
+            total = await conn.fetchval(base+'SELECT count(*) FROM filtered',*args)
+            page = min(page,max(1,(total+limit-1)//limit))
+            rows = await conn.fetch(base+'SELECT * FROM filtered ORDER BY display_name,user_id LIMIT $4 OFFSET $5',*args,limit,(page-1)*limit)
+    return {'items':[dict(row) for row in rows],'total':total,'page':page,'limit':limit}
 
 
 @router.patch("/admin/users/{user_id}")

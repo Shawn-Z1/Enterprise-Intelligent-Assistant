@@ -3,7 +3,8 @@ import { Activity, ArrowRight, ArrowUp, BookOpen, Check, ChevronRight, CircleHel
   Eye, EyeOff, FileText, Menu, MessageSquare, Plus, RefreshCw, Search,
   ShieldCheck, UserRound, UsersRound, Workflow, X } from 'lucide-react';
 import { apiRequest, ApiError, beijingTime, fetchEvents, fetchReadiness, type Conversation, type Readiness, type RunEvent, type UserProfile } from './api';
-import { PersonalCenter, StaffManagement } from './IdentityPages';
+import { PersonalCenter } from './IdentityPages';
+import { StaffManagement } from './StaffManagement';
 import { ChatWorkspace } from './ChatWorkspace';
 import { KnowledgePage } from './KnowledgePage';
 import { AuditPage } from './AuditPage';
@@ -62,7 +63,7 @@ export default function App() {
   const refreshUser = useCallback(async () => {
     try { const profile = await apiRequest<UserProfile>('/auth/me'); setUser(profile); setView('workspace'); setAuthError('');
       if (location.pathname === '/login') history.replaceState({},'', '/');
-      if (profile.role !== 'admin') setPage(current => current === 'staff' || current === 'audit' ? 'conversation' : current); }
+      if (profile.role !== 'admin') { setPanelOpen(false); setEvents([]); setPage(current => current === 'staff' || current === 'audit' ? 'conversation' : current); } }
     catch (error) { if (error instanceof ApiError && error.status === 401) { setUser(null); setView('login'); history.replaceState({},'', '/login'); }
       else { setAuthError(error instanceof Error ? error.message : '无法读取会话'); } }
     finally { setAuthLoading(false); }
@@ -90,7 +91,7 @@ export default function App() {
   async function logout() {
     try { await apiRequest('/auth/logout','POST'); }
     catch (error) { if (!(error instanceof ApiError && error.status === 401)) { setAuthError(error instanceof Error ? error.message : '退出失败'); throw error; } }
-    setUser(null); setPage('conversation'); setView('login'); history.replaceState({},'', '/login');
+    setPanelOpen(false); setEvents([]); setUser(null); setPage('conversation'); setView('login'); history.replaceState({},'', '/login');
   }
 
   /** 参数 signal 用于组件卸载取消；读取实际后端状态并更新界面，无返回值。 */
@@ -104,10 +105,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (user?.role !== 'admin') return;
     const controller = new AbortController();
     void refreshHealth(controller.signal);
     return () => controller.abort();
-  }, [refreshHealth]);
+  }, [refreshHealth,user?.role]);
 
   /** 参数 target 为预览目标；切换页面并同步路径，不执行登录或提权。 */
   function navigate(target: 'login' | 'workspace') {
@@ -122,8 +124,9 @@ export default function App() {
     return () => removeEventListener('popstate', restoreView);
   }, []);
 
-  /** 无参数打开运行状态面板并读取实际事件；失败保留明确说明，不制造事件。 */
+  /** 无参数为当前管理员打开运行状态并读取实际事件；其他身份不打开面板，无返回值。 */
   async function openStatus() {
+    if (user?.role !== 'admin') return;
     setPanelOpen(true);
     setEventsError('');
     try { setEvents(await fetchEvents()); }
@@ -135,7 +138,7 @@ export default function App() {
 
   const statusLabel = checking ? '正在检查连接' : healthError ? '服务连接失败' : health?.status === 'ready' ? '基础服务已就绪' : '基础服务未就绪';
 
-  const statusPanel = panelOpen && <aside className="status-panel" aria-label="基础服务运行状态">
+  const statusPanel = user?.role === 'admin' && panelOpen && <aside className="status-panel" aria-label="基础服务运行状态">
     <div className="panel-heading"><h2>运行状态</h2><button aria-label="关闭运行状态" onClick={() => setPanelOpen(false)}><X size={20} /></button></div>
     <p className="muted">来自后端的实际依赖检查</p>
     <button className="refresh-button" disabled={checking} onClick={() => void refreshHealth()}><RefreshCw size={16} className={checking ? 'spin' : ''} />{checking ? '检查中…' : '重新检查连接'}</button>
@@ -177,7 +180,7 @@ export default function App() {
         <button className="primary-button" disabled={authBusy} aria-describedby="auth-notice">{authBusy ? '正在处理…' : registration ? '创建账号并进入' : '登录'}</button>
       </form>
       <p className="switch-form">{registration ? '已有账号？' : '还没有账号？'}<button disabled={authBusy} onClick={() => { setRegistration(!registration); setAuthError(''); }}>{registration ? '登录已有账号' : '注册普通账号'}</button></p>
-    </div><button className="login-status" onClick={() => void openStatus()}><span className={`status-dot ${health?.status === 'ready' && !healthError ? 'healthy' : ''}`} />{statusLabel}<ChevronRight size={14} /></button></section>
+    </div></section>
     {statusPanel}
   </div>;
 
@@ -193,9 +196,9 @@ export default function App() {
       <div className="history-section"><div className="section-label">历史会话<button aria-label="刷新历史会话" onClick={()=>void refreshHistory()}><RefreshCw size={16} /></button></div>
         <label className="history-search"><Search size={16} aria-hidden="true" /><input aria-label="搜索历史会话" placeholder="搜索会话标题" value={historyQuery} onChange={event=>setHistoryQuery(event.target.value)} /></label>
         {historyError && <p className="error-text">{historyError}</p>}{historyRows.length===0 && !historyError && <p>发送第一条消息后，会话会保存在这里。</p>}
-        <div className="history-items">{historyRows.filter(row=>row.title.toLowerCase().includes(historyQuery.toLowerCase())).map(row=><button key={row.conversation_id} className={conversationId===row.conversation_id ? 'history-item active' : 'history-item'} onClick={()=>openConversation(row.conversation_id)}><span>{row.title}</span><time dateTime={row.updated_at}>{beijingTime(row.updated_at)}</time></button>)}</div>
+        <div className="history-items">{historyRows.filter(row=>row.title.toLowerCase().includes(historyQuery.toLowerCase())).map(row=><button key={row.conversation_id} title={`${row.title} · ${beijingTime(row.updated_at)}`} aria-label={`${row.title}，${beijingTime(row.updated_at)}`} className={conversationId===row.conversation_id ? 'history-item active' : 'history-item'} onClick={()=>openConversation(row.conversation_id)}><MessageSquare size={17} aria-hidden="true"/><span>{row.title}</span><time dateTime={row.updated_at}>{new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit'}).format(new Date(row.updated_at)).replace('/','-')}</time></button>)}</div>
       </div></div>
-      <div className="sidebar-footer"><button className="service-status" onClick={() => void openStatus()}><span className={`status-dot ${health?.status === 'ready' && !healthError ? 'healthy' : ''}`} />{statusLabel}<ChevronRight size={14} /></button>
+      <div className="sidebar-footer">{user.role === 'admin' && <button className="service-status" onClick={() => void openStatus()}><span className={`status-dot ${health?.status === 'ready' && !healthError ? 'healthy' : ''}`} />{statusLabel}<ChevronRight size={14} /></button>}
         <button className="profile-button" onClick={() => selectPage('profile')}><span className="avatar"><UserRound size={20} /></span><span><strong>{user.display_name}</strong><small>{user.role === 'admin' ? '系统管理员' : user.department_name || '待分配部门'}</small></span><ChevronRight size={15} /></button></div>
     </aside>
     <div className="main-area"><header className="topbar"><div><button className="mobile-menu" aria-label="展开导航" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(!sidebarOpen)}><Menu size={20} /></button><span>工作空间</span><ChevronRight size={14} /><strong>{pages[page]}</strong></div>
@@ -205,7 +208,7 @@ export default function App() {
           : <section className="module-placeholder"><span className="welcome-symbol">{page === 'automation' ? <Workflow size={26} /> : <UserRound size={26} />}</span><h1>{pages[page]}</h1>
             <p>{page === 'automation' ? '自动化任务流将在后续版本开放。' : '当前账号无法访问这个页面，请刷新资料。'}</p>
             <span className="placeholder-tag"><Check size={14} />入口已预留，功能尚未开放</span></section>}
-      </main><footer className="workspace-footer"><span>{authError || '支持文字、表格与文档处理；业务数据库查询需确认，重要结论请核实。'}</span><button onClick={() => void openStatus()}><Activity size={18} />运行状态</button></footer>
+      </main><footer className="workspace-footer"><span>{authError || '支持文字、表格与文档处理；业务数据库查询需确认，重要结论请核实。'}</span>{user.role === 'admin' && <button onClick={() => void openStatus()}><Activity size={18} />运行状态</button>}</footer>
     </div>{statusPanel}
   </div>;
 }

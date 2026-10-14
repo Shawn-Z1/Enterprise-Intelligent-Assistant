@@ -106,12 +106,12 @@ p { line-height: 1.7; }
 .new-chat:hover:not(:disabled) { background: #204c8f; }
 .new-chat span { margin-left: auto; font-size: 14px; font-weight: 400; }
 nav { display: grid; gap: 5px; }
-.nav-item { justify-content: flex-start; min-height: 52px; padding: 12px 16px; border-radius: 4px; font-size: 17px; color: #3d4e65; gap: 20px;}
+.nav-item { justify-content: flex-start; min-height: 42px; padding: 12px 16px; border-radius: 4px; font-size: 16px; color: #3d4e65; gap: 20px;}
 .nav-item.active { color: #214e90; background: #dbe5f3; font-weight: 600; }
 .nav-item svg, .new-chat svg { width: 21px; height: 21px; }
-.history-section { margin-top: 14px; padding: 16px 14px; border-top: 1px solid var(--line); }
+.history-section { margin-top: 14px; padding: 8px 8px 16px; border-top: 1px solid var(--line); }
 .section-label { display: flex; align-items: center; justify-content: space-between; font-size: 16px; font-weight: 600; color: #394b63; }
-.section-label button { min-width: 36px; min-height: 36px; }
+.section-label button { min-width:36px; min-height: 16px; }
 .history-section p { font-size: 16px; margin: 24px 0 8px; color: var(--muted); }
 .history-section small { font-size: 14px; color: var(--muted); line-height: 1.6; }
 .sidebar-footer { margin-top: auto; padding-top: 30px; }
@@ -324,17 +324,18 @@ nav { display: grid; gap: 5px; }
 }
 
 /* 真实会话沿用企业工作台的蓝灰配色；正文 18px，历史与状态辅助文字不小于 14px。 */
-.history-search { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 4px; padding: 9px 10px; margin-bottom: 12px; }
+.history-search { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; margin-top: 8px;}
 .history-search input { width: 100%; min-width: 0; border: 0; background: transparent; font-size: 15px; color: inherit; }
 .history-items { display: flex; flex-direction: column; gap: 5px; }
-.history-item { display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start; text-align: left; width: 100%; padding: 10px 12px; border-radius: 4px; min-height: 60px; }
-.history-item span { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; line-height: 1.5; }
-.history-item time { font-size: 14px; color: var(--muted); line-height: 1.6; }
+.history-item { display: grid; grid-template-columns: 18px minmax(0,1fr) auto; align-items: center; gap: 9px; text-align: left; width: 100%; padding: 9px 8px; border-radius: 5px; min-height: 42px; transition: background-color 160ms ease,color 160ms ease; }
+.history-item svg { color: var(--muted); }
+.history-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 1.5; }
+.history-item time { font-size: 12px; color: #78889e; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .history-item.active { background: #dce6f4; color: #214d87; }
 .chat-workspace { display: flex; flex-direction: column; min-height: 0; width: 100%; height: 100%; padding: 14px 32px 0px; }
 .chat-heading { display: flex; flex-shrink: 0; gap: 18px; align-items: center; justify-content: space-between; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .chat-heading>div { min-width: 0; }
-.chat-heading h1 { font-size: 26px; line-height: 1.4; margin: 0 0 4px; overflow-wrap: anywhere; }
+.chat-heading h1 { font-size: 24px; line-height: 1.4; margin: 0 0 4px; overflow-wrap: anywhere; }
 .chat-heading p { font-size: 14px; color: var(--muted); margin: 0; }
 .rename-chat { min-height: 44px; flex-shrink: 0; padding: 8px 10px; font-size: 15px; border: 1px solid var(--line); border-radius: 4px; }
 .rename-form { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 14px 0; font-size: 16px; }
@@ -342,15 +343,15 @@ nav { display: grid; gap: 5px; }
 .rename-form button { min-height: 44px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; }
 .chat-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 4px 8px; overflow-wrap: anywhere; }
 .chat-empty { padding: 30px 12px 22px; max-width: 820px; color: #405673; }
-.chat-empty h2 { font-size: 27px; color: #263244; margin: 18px 0 14px; }
-.chat-empty p { font-size: 18px; }
+.chat-empty h2 { font-size: 25px; color: #263244; margin: 18px 0 14px; }
+.chat-empty p { font-size: 16px; }
 .chat-message { padding: 18px 22px; margin: 0 0 18px; border-left: 3px solid #a5b2c5; background: #fff; }
 .chat-message.user { background: #edf3fa; border-left-color: var(--blue); }
 .message-meta { display: flex; align-items: center; gap: 14px; margin-bottom: 11px; font-size: 15px; color: var(--muted); }
-.message-meta strong { font-size: 17px; color: #263244; }
-.message-content { white-space: pre-wrap; font-size: 16px; line-height: 1.5; }
+.message-meta strong { font-size: 16px; color: #263244; }
+.message-content { white-space: pre-wrap; font-size: 15px; line-height: 1.3; }
 /* 模型正文采用Markdown排版；用户原文继续保留换行，表格和代码只在自身容器横向滚动。 */
-.message-content.message-markdown { white-space: normal; line-height: 1.7; }
+.message-content.message-markdown { white-space: normal; line-height: 1.5; }
 .message-markdown > :first-child { margin-top: 0; }
 .message-markdown > :last-child { margin-bottom: 0; }
 .message-markdown :is(h1,h2,h3,h4,h5,h6) { margin: 1.2em 0 .5em; line-height: 1.35; font-weight: 700; color: #263244; }

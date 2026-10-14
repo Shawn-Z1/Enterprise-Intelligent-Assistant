@@ -5,6 +5,7 @@ TOOL_NAMES={
     'query_business_data':'查询业务数据库','read_attachment':'详细读取附件','run_sandbox_code':'执行沙箱代码',
 }
 EVENT_NAMES={
+    'knowledge.record_removed':'删除失效知识管理记录（审计保留）',
     'http.started':'API 接收请求','http.completed':'API 返回响应','http.stream_opened':'打开回答事件流','http.stream_closed':'关闭回答事件流',
     'chat.message_received':'接收并保存用户消息','run.queued':'任务进入等待队列','run.started':'Worker 开始处理',
     'run.completed':'发布回答并完成本轮','run.failed':'本轮执行失败','run.cancelled':'用户停止本轮','run.interrupted':'本轮执行中断',

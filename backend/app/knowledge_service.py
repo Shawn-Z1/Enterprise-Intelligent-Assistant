@@ -48,6 +48,7 @@ def metadata(row: dict,context) -> dict:
     active = row['status'] not in INACTIVE and fingerprint(row)==row['fingerprint']
     value.update(can_preview=bool(active and acl_allows(context,row)),
                  can_delete=bool(active and context.can_use_knowledge),
+                 can_remove_record=bool(row['status']=='invalidated' and not row.get('management_deleted_at')),
                  can_withdraw=bool(row['status']=='pending_review' and context.can_use_knowledge),
                  can_review=bool(active and context.is_admin and row['status']=='pending_review'),
                  can_retry=bool(context.can_use_knowledge and (row['parse_status']=='failed' and row['status']=='pending_review' or context.is_admin and row['status']=='failed' or row['status']=='deleting' and row.get('error_json'))),
@@ -79,9 +80,9 @@ class KnowledgeService:
     async def application(self,application_id: str,context,body=False) -> dict:
         """接收申请编号和当前身份，读取本人或管理员管理资料；正文另校验 ACL、状态和材料指纹。"""
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow('''SELECT a.*,d.document_id,d.status AS document_status FROM app_knowledge.applications a
-                LEFT JOIN app_knowledge.documents d USING(application_id) WHERE a.application_id=$1''',application_id)
-        if row is None or not context.is_admin and row['creator_user_id']!=context.user_id:
+            row = await conn.fetchrow('''SELECT a.*,d.document_id,d.status AS document_status,u.display_name AS creator_name FROM app_knowledge.applications a
+                LEFT JOIN app_knowledge.documents d USING(application_id) JOIN app_system.users u ON u.user_id=a.creator_user_id WHERE a.application_id=$1''',application_id)
+        if row is None or row.get('management_deleted_at') or not context.is_admin and row['creator_user_id']!=context.user_id:
             raise auth_error(404,'NOT_FOUND','知识申请不存在或不可管理')
         result = dict(row)
         if body:
@@ -92,6 +93,23 @@ class KnowledgeService:
             if not acl_allows(context,result):
                 raise auth_error(403,'KNOWLEDGE_ACCESS_DENIED','当前部门或职级不符合此材料的访问范围')
         return result
+
+    async def remove_record(self,application_id: str,context,trace_id: str):
+        """接收申请编号、当前身份及追踪，仅允许所有者或当前管理员移除已失效目录记录；保留文件和审计，重复请求幂等。"""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                actor = await conn.fetchrow('SELECT role,status FROM app_system.users WHERE user_id=$1 FOR UPDATE',context.user_id)
+                row = await conn.fetchrow('SELECT * FROM app_knowledge.applications WHERE application_id=$1 FOR UPDATE',application_id)
+                if not actor or actor['status']!='active' or row is None or actor['role']!='admin' and row['creator_user_id']!=context.user_id:
+                    raise auth_error(404,'NOT_FOUND','知识记录不存在或不可管理')
+                if row['status']!='invalidated':
+                    raise auth_error(409,'RECORD_NOT_INACTIVE','只能删除已经失效的记录，请先停用文件并等待清理完成')
+                if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM app_knowledge.jobs WHERE application_id=$1 AND status IN ('pending','running'))",application_id):
+                    raise auth_error(409,'CLEANUP_PENDING','材料仍有后台任务，请等待清理完成后删除记录')
+                if row['management_deleted_at']:
+                    return
+                await conn.execute('UPDATE app_knowledge.applications SET management_deleted_at=now(),management_deleted_by=$2 WHERE application_id=$1',application_id,context.user_id)
+                await self.event(conn,trace_id,'knowledge.record_removed',dict(row),{'actor_user_id':context.user_id,'retained_audit':True})
 
     async def document(self,document_id: str,context) -> dict:
         """接收正式文档编号和当前身份，检查批准状态与 ACL；允许合法来源预览，不赋予他人管理权限。"""
