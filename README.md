@@ -151,7 +151,7 @@ sh scripts/deploy.sh
 
 脚本自动构建前后端、维护工具和 Guest 镜像，启动数据库、对象存储及 CPU 检索服务，执行结构迁移和初始数据导入，再启动 API、Worker、Runner 和 Nginx 网页服务。前端的依赖安装与静态页面构建都在镜像内完成，无需额外启动前端进程。版本回执保证重复执行不重置账号或重复导入。
 
-打开 **http://127.0.0.1:8080**，账号 **`admin`**，密码为本机 `.env` 的 `INITIAL_ADMIN_PASSWORD`。网页由 Nginx 提供，API 请求统一从同一入口转发，保留会话 Cookie、CSRF 和事件流。
+打开 **[http://127.0.0.1:8080](http://127.0.0.1:8080)**，账号 **`admin`**，密码为本机 `.env` 的 `INITIAL_ADMIN_PASSWORD`。网页由 Nginx 提供，API 请求统一从同一入口转发，保留会话 Cookie、CSRF 和事件流。
 
 ### 4. 检查服务
 
